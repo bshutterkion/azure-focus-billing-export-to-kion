@@ -39,8 +39,10 @@ teardown_test
 setup_test "fails when container creation fails on both auth modes"
 az_state RG_EXISTS 1; az_state SA_EXISTS 1
 export AZ_FAIL_MATCH="storage container create"
-out="$(bash "$S" --resource-group rg1 --storage-account sa1 --container focus 2>"$TEST_TMP/err" || true)"
+out="$(bash "$S" --resource-group rg1 --storage-account sa1 --container focus 2>"$TEST_TMP/err")"
+rc=$?
 unset AZ_FAIL_MATCH
+assert_eq "$rc" "1"
 assert_file_contains "$TEST_TMP/err" "could not create container"
 assert_eq "$out" ""
 teardown_test
