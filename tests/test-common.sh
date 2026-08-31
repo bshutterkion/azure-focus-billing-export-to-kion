@@ -3,6 +3,14 @@ set -uo pipefail
 . "$(dirname "$0")/lib/harness.sh"
 . "$REPO_DIR/scripts/lib/common.sh"
 
+# check_assert HELPER ARGS... — runs an assert_* helper in a subshell with
+# TEST_FAILED reset to 0, and echoes the resulting TEST_FAILED (0 pass / 1
+# fail). Because it's a subshell, any TEST_FAILED=1 set by fail() inside it
+# never leaks into the enclosing test's TEST_FAILED.
+check_assert() {
+  ( TEST_FAILED=0; "$@" >/dev/null 2>&1; echo "$TEST_FAILED" )
+}
+
 setup_test "cfg_get reads a key and strips quotes"
 printf 'TENANT_ID="abc-123"\nCONTAINER=focus\n' > "$TEST_TMP/t.env"
 assert_eq "$(cfg_get "$TEST_TMP/t.env" TENANT_ID)" "abc-123"
@@ -43,6 +51,30 @@ assert_eq "$(summary_exit_code)" "1"
 summary_reset
 summary_add tenant-c ok "done"
 assert_eq "$(summary_exit_code)" "0"
+teardown_test
+
+setup_test "assert_az_called passes when pattern is in AZ_LOG, fails when absent"
+echo "account show --query tenantId" >> "$AZ_LOG"
+assert_eq "$(check_assert assert_az_called "tenantId")" "0"
+assert_eq "$(check_assert assert_az_called "no-such-call")" "1"
+teardown_test
+
+setup_test "assert_az_not_called passes when pattern is absent, fails when present"
+echo "account show --query tenantId" >> "$AZ_LOG"
+assert_eq "$(check_assert assert_az_not_called "no-such-call")" "0"
+assert_eq "$(check_assert assert_az_not_called "tenantId")" "1"
+teardown_test
+
+setup_test "assert_curl_called passes when pattern is in CURL_LOG, fails when absent"
+echo "-sS -X POST https://example.test/api" >> "$CURL_LOG"
+assert_eq "$(check_assert assert_curl_called "POST")" "0"
+assert_eq "$(check_assert assert_curl_called "no-such-call")" "1"
+teardown_test
+
+setup_test "assert_file_contains passes when file has pattern, fails when it does not"
+printf 'hello\nworld\n' > "$TEST_TMP/f.txt"
+assert_eq "$(check_assert assert_file_contains "$TEST_TMP/f.txt" "wor")" "0"
+assert_eq "$(check_assert assert_file_contains "$TEST_TMP/f.txt" "no-such-pattern")" "1"
 teardown_test
 
 finish_tests
