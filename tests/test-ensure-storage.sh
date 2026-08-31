@@ -36,4 +36,13 @@ out="$(bash "$S" --resource-group rg1 --storage-account sa1 --container focus 2>
 assert_eq "$out" "https://sa.blob.core.usgovcloudapi.net/"
 teardown_test
 
+setup_test "fails when container creation fails on both auth modes"
+az_state RG_EXISTS 1; az_state SA_EXISTS 1
+export AZ_FAIL_MATCH="storage container create"
+out="$(bash "$S" --resource-group rg1 --storage-account sa1 --container focus 2>"$TEST_TMP/err" || true)"
+unset AZ_FAIL_MATCH
+assert_file_contains "$TEST_TMP/err" "could not create container"
+assert_eq "$out" ""
+teardown_test
+
 finish_tests

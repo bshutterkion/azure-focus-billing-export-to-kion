@@ -48,6 +48,6 @@ az storage container create --account-name "$STORAGE" --name "$CONTAINER" \
     --auth-mode login --only-show-errors >/dev/null 2>&1 \
   || az storage container create --account-name "$STORAGE" --name "$CONTAINER" \
     --resource-group "$RG" --auth-mode key --only-show-errors >/dev/null 2>&1 \
-  || log_warn "could not create container '$CONTAINER'; it may already exist"
+  || { log_err "could not create container '$CONTAINER' with either AAD or key auth"; exit 1; }
 
 az storage account show --name "$STORAGE" --resource-group "$RG" --query "primaryEndpoints.blob" -o tsv
