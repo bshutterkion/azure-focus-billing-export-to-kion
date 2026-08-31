@@ -1,0 +1,30 @@
+#!/bin/bash
+# Recording stub for az. Logs every invocation to $AZ_LOG and answers from
+# $AZ_STATE (key=value lines). Set AZ_FAIL_MATCH to a regex to force failure.
+echo "$*" >> "$AZ_LOG"
+state() { sed -n "s/^$1=//p" "$AZ_STATE" 2>/dev/null | tail -1; }
+if [ -n "${AZ_FAIL_MATCH:-}" ] && printf '%s' "$*" | grep -qE "$AZ_FAIL_MATCH"; then
+  echo "stub az: forced failure" >&2; exit 1
+fi
+case "$*" in
+  "account show --query tenantId"*)  echo "$(state TENANT_ID)" ;;
+  "account show --query id"*)        echo "$(state SUBSCRIPTION_ID)" ;;
+  "account list"*)                   echo "$(state SUBSCRIPTIONS)" | tr ',' '\n' ;;
+  "cloud show"*"resourceManager"*)   echo "$(state ARM_ENDPOINT)" ;;
+  "cloud show"*"microsoftGraphResourceId"*) echo "$(state GRAPH_ENDPOINT)" ;;
+  "cloud show"*"storageEndpoint"*)   echo "$(state BLOB_SUFFIX)" ;;
+  "cloud show"*"activeDirectory"*)   echo "$(state AD_ENDPOINT)" ;;
+  "group show"*)                     [ "$(state RG_EXISTS)" = 1 ] || exit 1 ;;
+  "storage account show"*"--query id"*) echo "/subscriptions/s/rg/r/sa" ;;
+  "storage account show"*"primaryEndpoints.blob"*) echo "$(state BLOB_ENDPOINT)" ;;
+  "storage account show"*)           [ "$(state SA_EXISTS)" = 1 ] || exit 1 ;;
+  "ad app list"*)                    echo "$(state APP_ID)" ;;
+  "ad app create"*)                  echo "new-app-id" ;;
+  "ad sp list"*)                     echo "$(state SP_OID)" ;;
+  "ad sp create"*)                   echo "new-sp-oid" ;;
+  "ad app credential reset"*)        echo '{"password":"stub-secret"}' ;;
+  "ad sp show --id 00000003"*)       echo '{"appRoles":[{"value":"User.Read.All","id":"r1"},{"value":"Group.Read.All","id":"r2"}],"oauth2PermissionScopes":[{"value":"User.Read","id":"s1"},{"value":"Directory.Read.All","id":"s2"}]}' ;;
+  "rest "*)                          echo '{"id":"/exports/stub"}' ;;
+  *) : ;;
+esac
+exit 0

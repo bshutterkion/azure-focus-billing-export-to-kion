@@ -1,0 +1,5 @@
+#!/bin/bash
+# Recording stub for curl. Logs the invocation and emits $CURL_BODY then the
+# status code on its own line, matching -w '\n%{http_code}'.
+echo "$*" >> "$CURL_LOG"
+printf '%s\n%s' "${CURL_BODY:-{\"data\":{\"id\":1}\}}" "${CURL_CODE:-201}"
