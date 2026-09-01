@@ -139,6 +139,18 @@ if grep -qE '^[[:space:]]*KION_PAYER_ID=' "$TENANT_FILE"; then
     chmod "$mode" "$TENANT_FILE"
   fi
 else
+  # This branch takes a hand-written tenant file, and a hand-written file may
+  # not end in a newline. Appending straight onto its last line produces
+  # `AZURE_CLOUD=AzureCloudKION_PAYER_ID=42`, which cfg_get reads as neither
+  # key: the cloud silently becomes garbage (so the Kion account type can flip
+  # Gov/Commercial) and the payer id is invisible, so the very next run creates
+  # a duplicate billing source. Command substitution strips trailing newlines,
+  # so a file already ending in one gives an empty last_byte and is left alone;
+  # so is an empty file.
+  last_byte="$(tail -c 1 "$TENANT_FILE")"
+  if [ -n "$last_byte" ]; then
+    printf '\n' >> "$TENANT_FILE"
+  fi
   printf 'KION_PAYER_ID=%s\n' "$payer_id" >> "$TENANT_FILE"
 fi
 log_info "recorded KION_PAYER_ID=$payer_id in $TENANT_FILE"

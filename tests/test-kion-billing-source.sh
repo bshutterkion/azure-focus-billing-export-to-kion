@@ -117,6 +117,39 @@ assert_file_contains "$TEST_TMP/t.env" "TENANT_ID=t-1"
 assert_file_contains "$TEST_TMP/t.env" "BILLING_MODEL=MCA"
 teardown_test
 
+# Every fixture above ships a `KION_PAYER_ID=` line, so only the rewrite branch
+# of the write-back was ever exercised. A hand-written tenant file has no such
+# line and takes the append branch instead.
+setup_test "appends the payer id to a tenant file that has no KION_PAYER_ID line"
+printf 'TENANT_ID=t-1\nBILLING_MODEL=MCA\nAZURE_CLOUD=AzureCloud\n' > "$TEST_TMP/t.env"
+# 640 for the same reason as the rewrite test below: 600 is mktemp's own
+# default, so a 600 fixture would pass even if the mode were not preserved.
+chmod 640 "$TEST_TMP/t.env"
+export CURL_BODY='{"data":{"id":88}}' CURL_CODE=201
+run_bs >/dev/null
+assert_file_contains "$TEST_TMP/t.env" "^KION_PAYER_ID=88$"
+# The rest of the file has to survive: this branch appends, it does not rewrite.
+assert_file_contains "$TEST_TMP/t.env" "^TENANT_ID=t-1$"
+assert_file_contains "$TEST_TMP/t.env" "^BILLING_MODEL=MCA$"
+assert_file_contains "$TEST_TMP/t.env" "^AZURE_CLOUD=AzureCloud$"
+assert_eq "$(stat -f '%Lp' "$TEST_TMP/t.env" 2>/dev/null || stat -c '%a' "$TEST_TMP/t.env")" "640"
+teardown_test
+
+# A hand-written file is also the one likely to be missing its final newline,
+# and this branch is the only place that appends to it.
+setup_test "appends on its own line even when the tenant file does not end in a newline"
+printf 'TENANT_ID=t-1\nBILLING_MODEL=MCA\nAZURE_CLOUD=AzureUSGovernment' > "$TEST_TMP/t.env"
+export CURL_BODY='{"data":{"id":88}}' CURL_CODE=201
+run_bs >/dev/null
+# Appending straight onto the last line yields `AZURE_CLOUD=AzureUSGovernmentKION_PAYER_ID=88`,
+# which cfg_get reads as neither key: the cloud silently becomes garbage, and
+# the payer id is invisible, so the next run creates a DUPLICATE billing
+# source. Both patterns are anchored, which is what makes them fail on that
+# concatenated line rather than matching it as a substring.
+assert_file_contains "$TEST_TMP/t.env" "^KION_PAYER_ID=88$"
+assert_file_contains "$TEST_TMP/t.env" "^AZURE_CLOUD=AzureUSGovernment$"
+teardown_test
+
 setup_test "a stat that produces nothing does not fail the script after a successful write-back"
 new_tenant_file MCA AzureCloud
 # Fake stat: always fails with no output, on both the BSD (-f) and GNU (-c)
