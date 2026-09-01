@@ -38,16 +38,25 @@ Two defects were found this way and fixed:
 
 ## Not yet verified — do these on the first real customer tenant
 
-### 1. Commercial cloud end to end
+### 1. The cloud guard's happy path
 
-Nothing here has run against `AzureCloud`. The api-version is documented for
-Commercial and Gov is normally the laggard, so the risk is low, but it is
-unverified.
+`onboard-tenant.sh` refuses to run when the CLI's active cloud is not the
+tenant's configured `AZURE_CLOUD`. It exists because the two are independent
+sources of truth: endpoints come from `az cloud show` (the active cloud) while
+`AZURE_CLOUD` selects the Kion account type id, so a mismatch would create
+correct Gov storage and then register the source as AzureMCA (16) instead of
+AzureMCAGov (18) — right data, wrong account type, no error.
 
-    az cloud set -n AzureCloud
-    az login --tenant <commercial-tenant-id>
-    make onboard TENANT=<name>
-    az cloud set -n AzureUSGovernment   # restore
+Only its rejection path has been exercised, with stubs. It now stands between the
+operator and every later step, so confirm on the first real run that a correctly
+configured tenant passes it rather than being blocked by a name-spelling
+mismatch. Cloud names are compared exactly and must be spelled as `az` reports
+them (`az account show --query environmentName -o tsv`).
+
+A Commercial run is **not** tracked separately here. Gov is the more restrictive
+cloud and passed live; endpoints are read from `az cloud show` at runtime, so
+there are no Commercial constants to get wrong; and item 2 below will exercise
+Commercial in passing.
 
 ### 2. Billing-scope exports (the one that matters most)
 
@@ -124,3 +133,22 @@ References:
 [Tutorial: create and manage exports](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-improved-exports),
 [Understand and work with scopes](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/understand-work-scopes),
 [Cost Management for partners](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/get-started-partners).
+
+## Defects found by verification rather than by tests
+
+Recorded because each one passed a green stub suite. A stub `az` accepts any URL
+and any payload, so it can only prove the code sends what it was told to send.
+
+| Defect | How it would have shown up | Found by |
+|---|---|---|
+| api-version `2023-08-01` cannot create FOCUS exports | every export creation fails on the first real tenant | reading Microsoft's docs |
+| Kion was given the bare prefix, not `<rootFolderPath>/<export-name>` | onboarding reports success; Kion finds nothing, forever | comparing real blob paths against Kion's own `MonthlyPrefix` |
+| Subscription-scope exports on a multi-subscription tenant | one subscription's costs ingest, the rest vanish silently | reading Kion's `getPartitionedManifestBlob` |
+| The operator banner printed the bare prefix | operator pastes the 0-blob value into Kion by hand | final whole-branch review |
+| `curl` stub's default body was invalid JSON | every happy-path controller test exited 1 and reported ok | final whole-branch review |
+| `AZURE_CLOUD` never checked against the CLI's active cloud | correct Gov storage, billing source registered as Commercial | questioning why a checklist item existed |
+| Appending a payer id to a file with no trailing newline | cloud silently becomes garbage and the payer id is invisible, so the next run creates a duplicate billing source | writing the first test for that branch |
+
+The pattern: every layer that was asserted against held, and every layer that was
+not — the operator-facing output, the success path's own exit code, the file
+format of a hand-edited config — did not.
