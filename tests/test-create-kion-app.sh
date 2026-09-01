@@ -41,6 +41,7 @@ f="$TEST_TMP/kion-app-app-42-credential.env"
 [ -f "$f" ] || fail "credential file not written"
 assert_file_contains "$f" "AZURE_CLIENT_SECRET"
 assert_eq "$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f")" "600"
+assert_eq "$(printf '%s\n' "$out" | sed -n 's/^CREDENTIAL_FILE=//p')" "$f"
 teardown_test
 
 setup_test "fails when the management group grant fails"

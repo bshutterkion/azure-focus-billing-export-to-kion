@@ -35,6 +35,7 @@
 #   Progress and diagnostics go to stderr. On success, stdout carries exactly:
 #     APP_ID=<app id>
 #     TENANT_DOMAIN=<initial domain>
+#     CREDENTIAL_FILE=<absolute path to the written credential file>
 #
 # Usage:
 #   ./create-kion-app.sh [--app-id <existing-app-id>] \
@@ -297,6 +298,11 @@ AZURE_CLIENT_SECRET=$CLIENT_SECRET
 AZURE_TENANT_ID=$TENANT_ID
 SECRET
 chmod 600 "$SECRET_FILE"
+# Report an absolute path: a caller running this script from a different
+# working directory (e.g. a controller invoking it via an absolute path)
+# would otherwise resolve "./kion-app-...-credential.env" against its own
+# cwd instead of the directory this script actually wrote into.
+CREDENTIAL_FILE_ABS="$(cd "$(dirname "$SECRET_FILE")" && pwd)/$(basename "$SECRET_FILE")"
 
 echo >&2
 log_info "NOTE: role assignments can take ~5-10 minutes to propagate (longer on"
@@ -330,3 +336,4 @@ EOF
 
 echo "APP_ID=$APP_ID"
 echo "TENANT_DOMAIN=$TENANT_DOMAIN"
+echo "CREDENTIAL_FILE=$CREDENTIAL_FILE_ABS"
