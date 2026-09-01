@@ -29,6 +29,25 @@ Or every tenant in `tenants/`, continuing past failures and printing a summary:
 
     make onboard-all
 
+The summary has one row per tenant with a cell for each step — storage,
+exports, app, billing source — then an overall status and a detail note:
+
+    TENANT      STORAGE  EXPORTS  APP      BILLING SOURCE  STATUS  DETAIL
+    acme        ok       ok       ok       ok              ok      onboarded
+    contoso     ok       ok       ok       warn            warn    payer 42 exists; set focus_storage_prefix=... in the Kion UI
+    fabrikam    ok       failed   -        -               failed  see output above
+
+`warn` means the tenant is onboarded but something still needs a human, and the
+run still exits 0. Today that is one case: a tenant whose `KION_PAYER_ID` is
+already set. Kion has no API for editing an existing Azure billing source, so a
+re-run cannot repair its FOCUS prefix — the detail column names the payer id and
+the prefix to set by hand. Only `failed` makes the run exit non-zero.
+
+A re-run of an already-onboarded tenant also mints a fresh client secret on the
+app registration (appended, so nothing existing is invalidated) that this run
+cannot deliver to Kion. It is written to `kion-app-<app-id>-credential.env` and
+called out on stderr; paste it into the Kion UI alongside the prefix.
+
 Each run logs in to the tenant, creates the resource group / storage account /
 container if missing, creates a single FOCUS export covering the whole tenant at
 billing-account scope, creates the Kion app with the permissions Kion needs,
@@ -89,10 +108,20 @@ by reading `tenants/*.env` directly. It makes no Azure or Kion API calls.
 
 `.env` holds Kion connection details and shared defaults; `tenants/<name>.env`
 holds per-tenant values, which override the `.env` default whenever the tenant
-file sets them non-empty. See `.env.example` and `tenants/example.env.example`
-for the full list, including `EXPORT_API_VERSION` — the Cost Management
-Exports API version, which Azure moves over time and which must be new enough
-to accept the FOCUS dataset type (`2023-08-01` and earlier cannot).
+file sets them non-empty. The values that work that way are exactly:
+
+`AZURE_CLOUD`, `BILLING_MODEL`, `EXPORT_PREFIX`, `EXPORT_SCOPE`,
+`EXPORT_API_VERSION`, `FOCUS_VERSION`, `EXPORT_RECURRENCE`, `EXPORT_TIMEFRAME`.
+
+`KION_HOST`, `KION_API_KEY` and `KION_API_BASE` are `.env`-only: one Kion serves
+every tenant. `RESOURCE_GROUP`, `STORAGE_ACCOUNT`, `CONTAINER`, `LOCATION`,
+`BILLING_SCOPE_ID`, `SUBSCRIPTIONS`, `MANAGEMENT_GROUP` and `KION_PAYER_ID` are
+per-tenant only.
+
+See `.env.example` and `tenants/example.env.example` for the full list,
+including `EXPORT_API_VERSION` — the Cost Management Exports API version, which
+Azure moves over time and which must be new enough to accept the FOCUS dataset
+type (`2023-08-01` and earlier cannot).
 
 `.env` values are also parsed by `make` itself (`-include .env`), so avoid `#`
 and `$` in values there — see the warning at the top of `.env.example`.
@@ -102,4 +131,6 @@ and `$` in values there — see the warning at the top of `.env.example`.
     make test
 
 Tests stub `az` and `curl` on `PATH` and assert on the calls made. Nothing
-touches Azure or Kion.
+touches Azure or Kion. The suite also runs `bash -n` over every script and,
+when `shellcheck` is on `PATH`, `shellcheck -S warning`; it skips the
+shellcheck test cleanly when it is not installed.

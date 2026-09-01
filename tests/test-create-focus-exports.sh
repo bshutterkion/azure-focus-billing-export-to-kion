@@ -32,7 +32,8 @@ teardown_test
 
 setup_test "auto-enumerated subscriptions also trigger the hard fail"
 az_state SUBSCRIPTIONS "$SUB_X,$SUB_Y"
-if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus >/dev/null 2>"$TEST_TMP/err"; then
+if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --tenant-id t-1 \
+   >/dev/null 2>"$TEST_TMP/err"; then
   fail "expected non-zero exit"
 fi
 assert_file_contains "$TEST_TMP/err" "$SUB_X"
@@ -69,9 +70,49 @@ teardown_test
 
 setup_test "enumerates a single subscription when none are given"
 az_state SUBSCRIPTIONS "$SUB_X"
-bash "$S" --storage-account-id "$SAID" --container focus --prefix focus >/dev/null
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --tenant-id t-1 >/dev/null
 assert_az_called "account list"
 assert_az_called "subscriptions/$SUB_X/providers"
+teardown_test
+
+# `az account list` returns every subscription in the CLI profile for the
+# current cloud, across every tenant signed into it. onboard-all.sh signs into
+# each tenant in turn, so from the second tenant onward the profile holds the
+# previous tenants' subscriptions as well -- and an unfiltered list then either
+# trips the >1 guard on a legitimate single-subscription tenant or exports
+# against a subscription in the wrong tenant.
+setup_test "discovery resolves only the target tenant's subscriptions from a two-tenant profile"
+# The profile as a whole holds three subscriptions across two tenants...
+az_state SUBSCRIPTIONS "$SUB_A,$SUB_X,$SUB_Y"
+az_state "SUBSCRIPTIONS_t-1" "$SUB_A"
+az_state "SUBSCRIPTIONS_t-2" "$SUB_X,$SUB_Y"
+# ...and tenant t-1 owns exactly one, so this must succeed, not hit the guard.
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --tenant-id t-1 \
+  >/dev/null 2>"$TEST_TMP/err"
+rc=$?
+assert_eq "$rc" "0"
+assert_az_called "tenantId=='t-1'"
+assert_az_called "subscriptions/$SUB_A/providers"
+assert_az_not_called "subscriptions/$SUB_X/providers"
+assert_az_not_called "subscriptions/$SUB_Y/providers"
+teardown_test
+
+setup_test "discovery without --tenant-id is refused rather than listing every tenant's subscriptions"
+az_state SUBSCRIPTIONS "$SUB_A"
+if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "tenant-id"
+assert_az_not_called "account list"
+assert_az_not_called "rest --method put"
+teardown_test
+
+setup_test "an explicit --subscriptions list needs no --tenant-id"
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+  --subscriptions "$SUB_A" >/dev/null
+assert_az_not_called "account list"
+assert_az_called "subscriptions/$SUB_A/providers"
 teardown_test
 
 setup_test "non-subscription scope requires a billing scope id"

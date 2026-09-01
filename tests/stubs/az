@@ -9,7 +9,19 @@ fi
 case "$*" in
   "account show --query tenantId"*)  echo "$(state TENANT_ID)" ;;
   "account show --query id"*)        echo "$(state SUBSCRIPTION_ID)" ;;
-  "account list"*)                   echo "$(state SUBSCRIPTIONS)" | tr ',' '\n' ;;
+  # `account list` honours a --query filter of the form [?tenantId=='<id>'],
+  # answering from state key SUBSCRIPTIONS_<id> when the test defines one. That
+  # is what lets a test model a CLI profile holding two tenants' subscriptions
+  # (SUBSCRIPTIONS=all of them, SUBSCRIPTIONS_<tid>=just one tenant's) and
+  # prove the caller filters. With no such key, fall back to SUBSCRIPTIONS.
+  "account list"*)
+    _q_tenant="$(printf '%s' "$*" | sed -n "s/.*tenantId=='\([^']*\)'.*/\1/p")"
+    if [ -n "$_q_tenant" ] && grep -q "^SUBSCRIPTIONS_${_q_tenant}=" "$AZ_STATE" 2>/dev/null; then
+      echo "$(state "SUBSCRIPTIONS_${_q_tenant}")" | tr ',' '\n'
+    else
+      echo "$(state SUBSCRIPTIONS)" | tr ',' '\n'
+    fi
+    ;;
   "cloud show"*"resourceManager"*)   echo "$(state ARM_ENDPOINT)" ;;
   "cloud show"*"microsoftGraphResourceId"*) echo "$(state GRAPH_ENDPOINT)" ;;
   "cloud show"*"storageEndpoint"*)   echo "$(state BLOB_SUFFIX)" ;;

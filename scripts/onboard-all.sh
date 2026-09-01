@@ -16,6 +16,18 @@ done
 ONBOARD_TENANT_BIN="${ONBOARD_TENANT_BIN:-$HERE/onboard-tenant.sh}"
 
 summary_reset
+
+# onboard-tenant.sh reports each step it finishes as a STEP=<name>:<state> line
+# on stdout (and at most one free-text STEP_DETAIL= line). Reading them back is
+# what lets a row say "billing-source warn" instead of a flat "ok" for a tenant
+# that is onboarded but still needs a human in the Kion UI. A step that never
+# reported is "-": the run died before reaching it.
+step_state() { # FILE NAME
+  local v
+  v="$(sed -n "s/^STEP=$2://p" "$1" | tail -n1)"
+  printf '%s' "${v:--}"
+}
+
 found=0
 for f in "$DIR"/*.env; do
   [ -f "$f" ] || continue
@@ -28,7 +40,7 @@ for f in "$DIR"/*.env; do
   tenant_id="$(cfg_get "$f" TENANT_ID)"
   if [ -z "$tenant_id" ]; then
     log_info "=== $name === skipped: TENANT_ID is empty in $f"
-    summary_add "$name" skipped "TENANT_ID is empty"
+    summary_add "$name" - - - - skipped "TENANT_ID is empty"
     continue
   fi
 
@@ -37,10 +49,34 @@ for f in "$DIR"/*.env; do
   # into the next iteration regardless of how it's invoked here; what keeps
   # one tenant's failure from ending the loop is the `if` below, not a
   # subshell.
-  if "$ONBOARD_TENANT_BIN" --tenant-file "$f"; then
-    summary_add "$name" ok "onboarded"
+  #
+  # `| tee` keeps the step lines on screen while capturing them; pipefail (set
+  # at the top of this script) is what makes the pipeline still report
+  # onboard-tenant.sh's own failure rather than tee's success.
+  steps="$(mktemp)"
+  if "$ONBOARD_TENANT_BIN" --tenant-file "$f" | tee "$steps"; then
+    ok=1
   else
-    summary_add "$name" failed "see output above"
+    ok=0
+  fi
+  st="$(step_state "$steps" storage)"
+  ex="$(step_state "$steps" exports)"
+  ap="$(step_state "$steps" app)"
+  bs="$(step_state "$steps" billing-source)"
+  detail="$(sed -n 's/^STEP_DETAIL=//p' "$steps" | tail -n1)"
+  rm -f "$steps"
+
+  if [ "$ok" -eq 1 ]; then
+    # A tenant whose billing source came back `warn` is onboarded, so the run
+    # is not a failure -- but the overall status must not read `ok` either, or
+    # the one row an operator actually reads hides the outstanding manual step.
+    if [ "$bs" = warn ]; then
+      summary_add "$name" "$st" "$ex" "$ap" "$bs" warn "${detail:-needs attention in the Kion UI}"
+    else
+      summary_add "$name" "$st" "$ex" "$ap" "$bs" ok "${detail:-onboarded}"
+    fi
+  else
+    summary_add "$name" "$st" "$ex" "$ap" "$bs" failed "${detail:-see output above}"
   fi
 done
 

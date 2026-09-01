@@ -1,6 +1,7 @@
 #!/bin/bash
 # Test harness: stub az/curl on PATH, record calls, assert on them.
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC2034  # read by every test file that sources this one
 REPO_DIR="$(cd "$HARNESS_DIR/.." && pwd)"
 TESTS_RUN=0; TESTS_FAILED=0; CURRENT_TEST=""
 

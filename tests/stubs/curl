@@ -17,4 +17,10 @@ if [ ! -t 0 ]; then
     [ -n "$data_path" ] && [ -f "$data_path" ] && cat "$data_path"
   } >> "${CURL_STDIN_LOG:-/dev/null}"
 fi
-printf '%s\n%s' "${CURL_BODY:-{\"data\":{\"id\":1}\}}" "${CURL_CODE:-201}"
+# The default body must be VALID JSON. Written inline in a ${VAR:-...} default
+# it needed a backslash to protect the closing brace from the expansion's own
+# parsing, and that backslash landed in the output: every caller's `jq` then
+# failed to parse it, so every success-path test that did not set CURL_BODY was
+# in fact exercising a failed run. Build it in a plain variable instead.
+default_body='{"data":{"id":1}}'
+printf '%s\n%s' "${CURL_BODY:-$default_body}" "${CURL_CODE:-201}"

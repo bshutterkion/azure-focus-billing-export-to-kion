@@ -18,11 +18,14 @@
 # inserts the export name itself as a folder below rootFolderPath, so the
 # value is always "<rootFolderPath>/<export name>", never the bare
 # rootFolderPath a caller might otherwise guess at.
+#
+# --tenant-id is required when subscription scope has to discover the tenant's
+# subscriptions itself; see the comment on the `az account list` call below.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 STORAGE_ID=""; CONTAINER=""; PREFIX="focus"
-SCOPE="subscription"; BILLING_SCOPE_ID=""; SUBSCRIPTIONS=""
+SCOPE="subscription"; BILLING_SCOPE_ID=""; SUBSCRIPTIONS=""; TENANT_ID=""
 FOCUS_VERSION="1.0"; RECURRENCE="Daily"; TIMEFRAME="MonthToDate"
 API_VERSION="2025-03-01"
 PRINT_ONLY=0; NO_RUN_NOW=0
@@ -35,6 +38,7 @@ while [ $# -gt 0 ]; do
     --scope)              SCOPE="$2"; shift 2 ;;
     --billing-scope-id)   BILLING_SCOPE_ID="$2"; shift 2 ;;
     --subscriptions)      SUBSCRIPTIONS="$2"; shift 2 ;;
+    --tenant-id)          TENANT_ID="$2"; shift 2 ;;
     --focus-version)      FOCUS_VERSION="$2"; shift 2 ;;
     --recurrence)         RECURRENCE="$2"; shift 2 ;;
     --timeframe)          TIMEFRAME="$2"; shift 2 ;;
@@ -63,7 +67,19 @@ SCOPES=""
 case "$SCOPE" in
   subscription)
     if [ -z "$SUBSCRIPTIONS" ]; then
-      SUBSCRIPTIONS="$(az account list --query "[].id" -o tsv | tr '\n' ' ')"
+      # `az account list` returns every subscription in the CLI profile for the
+      # current cloud -- across every tenant that has ever signed in to it, not
+      # just the active one. onboard-all.sh signs into each tenant in turn, so
+      # by the second tenant the profile holds the first tenant's subscriptions
+      # too: the tool's own loop creates the condition. Unfiltered, that either
+      # trips the >1 guard below on a legitimate single-subscription tenant, or
+      # (with access) creates an export against a subscription in the wrong
+      # tenant. Filter server-side by the tenant actually being onboarded.
+      [ -n "$TENANT_ID" ] || {
+        log_err "--tenant-id is required to discover subscriptions at subscription scope"
+        log_err "without it 'az account list' would return every tenant's subscriptions in this CLI profile, not just this tenant's"
+        exit 2; }
+      SUBSCRIPTIONS="$(az account list --query "[?tenantId=='$TENANT_ID'].id" -o tsv | tr '\n' ' ')"
     fi
     found=""; count=0
     # Every entry must be a bare GUID: subscription ids never carry commas or

@@ -32,13 +32,18 @@ run_bs >/dev/null
 assert_curl_stdin_contains '"account_type_id":16'
 teardown_test
 
-setup_test "skips when the tenant already has a payer id"
+setup_test "an already-onboarded tenant creates nothing and exits 3, not 0"
 printf 'TENANT_ID=t-1\nBILLING_MODEL=MCA\nAZURE_CLOUD=AzureCloud\nKION_PAYER_ID=42\n' > "$TEST_TMP/t.env"
-set +e
-run_bs >/dev/null 2>"$TEST_TMP/err"
+# A distinct prefix fixture, deliberately unlike anything in the warning text.
+# With `--prefix focus`, `assert_file_contains err "focus"` matched the literal
+# "focus_storage_prefix" inside the message, so blanking the printed value left
+# this test green. `run_bs`'s own --prefix comes first, so this one wins.
+run_bs --prefix zzz-prefix-check >/dev/null 2>"$TEST_TMP/err"
 rc=$?
-set -e
-assert_eq "$rc" "0"
+# Exit 3, not 0: "onboarded, but its FOCUS prefix still needs setting by hand"
+# has to be distinguishable by a caller building a summary, because stderr does
+# not reach a summary table.
+assert_eq "$rc" "3"
 [ -s "$TEST_TMP/curl.log" ] && fail "should not have called kion"
 # The warning must be actionable without re-deriving anything: it has to name
 # the existing payer id and the correct prefix, and say plainly that the
@@ -46,7 +51,7 @@ assert_eq "$rc" "0"
 # billing source, so this warning is the only place an operator learns to go
 # set it in the Kion UI).
 assert_file_contains "$TEST_TMP/err" "42"
-assert_file_contains "$TEST_TMP/err" "focus"
+assert_file_contains "$TEST_TMP/err" "zzz-prefix-check"
 assert_file_contains "$TEST_TMP/err" "NOT updated"
 teardown_test
 

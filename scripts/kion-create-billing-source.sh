@@ -2,6 +2,17 @@
 #
 # kion-create-billing-source.sh — register the Kion billing source that reads a
 # tenant's FOCUS exports from blob storage.
+#
+# Exit codes:
+#   0  billing source created (payer id written back into the tenant file), or
+#      --dry-run completed
+#   1  the run failed
+#   2  bad usage / missing required configuration
+#   3  the tenant already has KION_PAYER_ID, so nothing was created AND the
+#      existing source's FOCUS prefix was NOT updated. The tenant is onboarded,
+#      but a human must set focus_storage_prefix in the Kion UI. Callers must
+#      treat this as a warning, not a failure: it is not exit 0 because a run
+#      that did not finish the job must never be summarised as plain "ok".
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -48,7 +59,10 @@ if [ -n "$EXISTING" ]; then
   # and every re-run reports success without ever saying so.
   log_warn "billing source already exists (payer $EXISTING); its FOCUS prefix was NOT updated"
   log_warn "set focus_storage_prefix=$PREFIX on payer $EXISTING in the Kion UI (Kion has no API for editing an existing Azure billing source)"
-  exit 0
+  # Exit 3, not 0: stderr alone cannot reach the run summary, and a summary
+  # row reading "ok" for a tenant whose prefix still needs setting by hand is
+  # exactly how this stayed invisible. See the exit-code table above.
+  exit 3
 fi
 
 MODEL="$(cfg_get "$TENANT_FILE" BILLING_MODEL)"; MODEL="${MODEL:-${BILLING_MODEL:-MCA}}"

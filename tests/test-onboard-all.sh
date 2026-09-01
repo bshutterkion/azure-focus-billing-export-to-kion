@@ -65,6 +65,69 @@ fi
 assert_file_contains "$TEST_TMP/err" "no tenant files"
 teardown_test
 
+# Every test above replaces onboard-tenant.sh with a fake, so nothing exercises
+# the real controller through the loop -- which is exactly how a summary row
+# reading "ok" for a run that never updated Kion's prefix stayed hidden. These
+# two run the real onboard-tenant.sh against the az/curl stubs.
+real_seam_tenants() {
+  mkdir -p "$TEST_TMP/tenants"
+  # Both tenants are the same tenant id because the az stub answers
+  # `account show --query tenantId` from a single shared state file; the tenant
+  # files differ in what matters here, whether KION_PAYER_ID is already set.
+  cat > "$TEST_TMP/tenants/fresh.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureUSGovernment
+BILLING_MODEL=MCA
+RESOURCE_GROUP=rg
+STORAGE_ACCOUNT=sa
+CONTAINER=focus
+EXPORT_SCOPE=billingAccount
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
+KION_PAYER_ID=
+EOF
+  sed 's/^KION_PAYER_ID=$/KION_PAYER_ID=42/' "$TEST_TMP/tenants/fresh.env" \
+    > "$TEST_TMP/tenants/already.env"
+}
+
+setup_test "real onboard-tenant.sh through the loop: a fresh tenant is ok and records its payer id"
+real_seam_tenants
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+out="$(KION_HOST=https://k KION_API_KEY=k bash "$S" --dir "$TEST_TMP/tenants" 2>&1)"
+rc=$?
+[ "$rc" -eq 0 ] || fail "expected exit 0, got $rc"
+row="$(printf '%s\n' "$out" | grep '^fresh ')"
+[ -n "$row" ] || fail "no summary row for the fresh tenant"
+# Field 6 is the status column: tenant, storage, exports, app, billing source,
+# status. Matching "ok" anywhere in the row would match the per-step cells too.
+assert_eq "$(printf '%s\n' "$row" | awk '{print $6}')" "ok"
+assert_eq "$(printf '%s\n' "$row" | awk '{print $5}')" "ok"
+assert_file_contains "$TEST_TMP/tenants/fresh.env" "^KION_PAYER_ID=1$"
+teardown_test
+
+setup_test "real onboard-tenant.sh through the loop: an already-onboarded tenant is warn, not ok"
+real_seam_tenants
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+out="$(KION_HOST=https://k KION_API_KEY=k bash "$S" --dir "$TEST_TMP/tenants" 2>&1)"
+rc=$?
+# A warning, not a failure: the tenant is onboarded, so the run still exits 0.
+[ "$rc" -eq 0 ] || fail "expected exit 0 for a warn-only run, got $rc"
+row="$(printf '%s\n' "$out" | grep '^already ')"
+[ -n "$row" ] || fail "no summary row for the already-onboarded tenant"
+# Field 5 is the billing-source cell, field 6 the status. Both must say warn:
+# a bare "ok" in either is the failure this item is about -- the tenant is
+# onboarded, but its FOCUS prefix still needs setting by hand in the Kion UI,
+# and the summary is the one line an operator reads.
+assert_eq "$(printf '%s\n' "$row" | awk '{print $5}')" "warn"
+assert_eq "$(printf '%s\n' "$row" | awk '{print $6}')" "warn"
+case "$row" in *42*) : ;; *) fail "row detail does not name the payer id that needs attention: $row" ;; esac
+teardown_test
+
 setup_test "make status makes no Azure or Kion calls"
 make_tenants alpha beta
 out="$(cd "$REPO_DIR" && make status TENANTS_DIR="$TEST_TMP/tenants" 2>&1)"

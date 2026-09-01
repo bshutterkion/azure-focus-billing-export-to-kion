@@ -47,12 +47,40 @@ kion_account_type() {
 }
 
 # Summary rows accumulate in a temp file so subshells can append to them.
+#
+# One tab-separated row per tenant, in the design spec's column order:
+#
+#   tenant  storage  exports  app  billing-source  status  [detail]
+#
+# Each per-step cell is one of: ok, warn, failed, skipped, or "-" when the run
+# never got that far. A three-column (tenant, status, detail) summary is what
+# let a run that deliberately did NOT update Kion's FOCUS prefix report a bare
+# "ok"; per-step cells make that visible as a `warn` in the billing-source
+# column without downgrading the run to a failure.
+#
+# `detail` is a seventh column, beyond the spec's six: a `warn` cell is useless
+# to an operator without naming the payer id that needs its prefix set by hand,
+# and the spec has no column for that text.
 summary_reset() { SUMMARY_FILE="${SUMMARY_FILE:-$(mktemp)}"; : > "$SUMMARY_FILE"; export SUMMARY_FILE; }
-summary_add()   { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$SUMMARY_FILE"; }
+summary_add() {
+  # Fail loudly rather than writing a misaligned row: a caller still passing
+  # the old three arguments would otherwise land its status text in the
+  # `exports` column and leave `status` empty, which summary_exit_code reads.
+  [ $# -ge 6 ] || { log_err "summary_add needs 6 or 7 fields (tenant storage exports app billing-source status [detail]), got $#"; return 2; }
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "${7:-}" >> "$SUMMARY_FILE"
+}
+SUMMARY_FMT='%-20s %-8s %-8s %-8s %-14s %-7s %s\n'
 summary_print() {
   echo ""
-  printf '%-24s %-8s %s\n' "TENANT" "STATUS" "DETAIL"
-  printf '%-24s %-8s %s\n' "------" "------" "------"
-  while IFS=$'\t' read -r t s d; do printf '%-24s %-8s %s\n' "$t" "$s" "$d"; done < "$SUMMARY_FILE"
+  # shellcheck disable=SC2059  # SUMMARY_FMT is this file's own literal format
+  printf "$SUMMARY_FMT" "TENANT" "STORAGE" "EXPORTS" "APP" "BILLING SOURCE" "STATUS" "DETAIL"
+  # shellcheck disable=SC2059
+  printf "$SUMMARY_FMT" "------" "-------" "-------" "---" "--------------" "------" "------"
+  while IFS=$'\t' read -r t st ex ap bs stat d; do
+    # shellcheck disable=SC2059
+    printf "$SUMMARY_FMT" "$t" "$st" "$ex" "$ap" "$bs" "$stat" "$d"
+  done < "$SUMMARY_FILE"
 }
-summary_exit_code() { grep -q $'\tfailed\t' "$SUMMARY_FILE" && echo 1 || echo 0; }
+# Only the status column decides the exit code. A `warn` anywhere is
+# deliberately exit 0: the tenant is onboarded, something needs a human.
+summary_exit_code() { awk -F'\t' '$6 == "failed" { f = 1 } END { print (f ? 1 : 0) }' "$SUMMARY_FILE"; }

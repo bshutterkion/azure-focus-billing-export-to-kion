@@ -55,7 +55,13 @@
 #   --resource-group <rg>    Resource group holding the FOCUS storage account
 #   --storage-account <sa>   FOCUS storage account
 #   --container <name>       FOCUS container to grant Storage Blob Data Reader on
-#   --prefix <path>          Export prefix for FOCUS data (default: "focus")
+#   --prefix <path>          The FOCUS prefix to print in the billing-source summary,
+#                            verbatim as Kion must receive it. There is deliberately
+#                            no default: only create-focus-exports.sh knows the
+#                            rootFolderPath AND the export name Azure inserts below
+#                            it, and a guessed prefix (the bare rootFolderPath)
+#                            points Kion at a path that holds no blobs at all.
+#                            Omitted, the summary simply prints no prefix line.
 #   --enable-subscription-creation
 #                            Also create/assign the "Minimal subscription move"
 #                            custom role so Kion can create subscriptions + RGs
@@ -76,7 +82,7 @@ MANAGEMENT_GROUP=""
 RG=""
 STORAGE=""
 CONTAINER=""
-EXPORT_PREFIX="focus"
+EXPORT_PREFIX=""
 ENABLE_SUB_CREATION=0
 ROTATION_PERMS=0
 DO_GRAPH=1
@@ -320,12 +326,30 @@ App (Client) ID:  $APP_ID
 Client Secret:    (written to $SECRET_FILE, mode 0600)
 Tenant ID:        $TENANT_ID
 EOF
-[[ -n "$BLOB_ENDPOINT" ]] && cat <<EOF >&2
+if [[ -n "$BLOB_ENDPOINT" ]]; then
+  cat <<EOF >&2
 FOCUS endpoint:   $BLOB_ENDPOINT
 FOCUS container:  $CONTAINER
-FOCUS prefix:     $EXPORT_PREFIX
-                  (each subscription's data sits in <prefix>/<subscription-id>/)
 EOF
+  # No --prefix, no prefix line. Printing a plausible-looking default here is
+  # worse than printing nothing: this framed block is what an operator copies
+  # into the Kion UI, and the bare rootFolderPath (the only value that could be
+  # guessed from here) lists zero blobs, because Azure inserts the export name
+  # as a folder below it.
+  if [[ -n "$EXPORT_PREFIX" ]]; then
+    cat <<EOF >&2
+FOCUS prefix:     $EXPORT_PREFIX
+                  (paste verbatim; it already includes the export-name folder
+                   Azure inserts. Azure writes
+                   <prefix>/<YYYYMMDD-YYYYMMDD>/<runstamp>/<run-guid>/manifest.json)
+EOF
+  else
+    cat <<EOF >&2
+FOCUS prefix:     (not available here -- run without --prefix. Take it verbatim
+                  from the KION_PREFIX= line the export step prints.)
+EOF
+  fi
+fi
 cat <<EOF >&2
 
 Record the billing source id Kion assigns, and put it in this customer's env
