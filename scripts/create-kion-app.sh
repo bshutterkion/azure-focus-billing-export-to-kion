@@ -6,9 +6,9 @@
 # customer tenant and READ that tenant's FOCUS billing data. Run by the
 # customer, authenticated to THEIR OWN tenant.
 #
-# This is the identity that goes on the tenant's Kion "Azure CSP Government"
-# billing source. Kion uses that single app for three jobs, so it needs all
-# three sets of rights:
+# This is the identity that goes on the tenant's Kion billing source.
+# Kion uses that single app for three jobs, so it needs all three sets of
+# rights:
 #
 #   1. Resource management (azure-sync: policy sets, role assignments, resource
 #      groups)          -> "Owner" on a management group
@@ -274,8 +274,9 @@ fi
 
 # ---------- resolve the tenant domain ----------
 TENANT_DOMAIN=$(az rest --method GET --url "${GRAPH_ENDPOINT}/v1.0/domains" 2>/dev/null \
-  | jq -r '.value[] | select(.isInitial==true) | .id' | head -1 || echo "")
+  | jq -r '.value[] | select(.isInitial==true) | .id' 2>/dev/null | head -1 || true)
 if [[ -z "$TENANT_DOMAIN" ]]; then
+  log_warn "could not resolve the tenant domain from Microsoft Graph. A guessed domain is being used; verify it before using it for a Kion billing source."
   case "$GRAPH_ENDPOINT" in
     *microsoft.us*) TENANT_DOMAIN="${TENANT_ID}.onmicrosoft.us" ;;
     *)              TENANT_DOMAIN="${TENANT_ID}.onmicrosoft.com" ;;
@@ -301,19 +302,19 @@ echo "    US Gov) before Kion's credential tests pass." >&2
 cat <<EOF >&2
 
 ============================================================
-  KION BILLING SOURCE  (Azure CSP Government, FOCUS reports)
+  KION BILLING SOURCE (FOCUS reports)
 ============================================================
 
-Customer Name:    $APP_NAME
+Display Name:     $APP_NAME
 Domain:           $TENANT_DOMAIN
 App (Client) ID:  $APP_ID
 Client Secret:    (written to $SECRET_FILE, mode 0600)
-CSP Customer ID:  $TENANT_ID
+Tenant ID:        $TENANT_ID
 EOF
 [[ -n "$BLOB_ENDPOINT" ]] && cat <<EOF >&2
 FOCUS endpoint:   $BLOB_ENDPOINT
 FOCUS container:  $CONTAINER
-FOCUS prefix:     azure_partner_center/$TENANT_ID/usage
+FOCUS prefix:     focus/$TENANT_ID
 EOF
 cat <<EOF >&2
 

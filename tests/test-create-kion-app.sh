@@ -54,4 +54,11 @@ assert_file_contains "$TEST_TMP/err" "management group"
 unset AZ_FAIL_MATCH
 teardown_test
 
+setup_test "warns when tenant domain lookup fails from Graph"
+az_state APP_ID "app-42"; az_state SP_OID "sp-1"; az_state TENANT_ID "t-1"
+cd "$TEST_TMP"
+bash "$S" --resource-group rg --storage-account sa --container focus >/dev/null 2>"$TEST_TMP/err"
+assert_file_contains "$TEST_TMP/err" "WARNING.*domain from Microsoft Graph"
+teardown_test
+
 finish_tests
