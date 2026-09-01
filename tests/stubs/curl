@@ -1,5 +1,20 @@
 #!/bin/bash
-# Recording stub for curl. Logs the invocation and emits $CURL_BODY then the
-# status code on its own line, matching -w '\n%{http_code}'.
+# Recording stub for curl. Logs the argv invocation to $CURL_LOG and emits
+# $CURL_BODY then the status code on its own line, matching -w '\n%{http_code}'.
+#
+# When invoked with a curl config file on stdin (--config -, the mechanism
+# callers use to keep secrets off argv), also captures that stdin verbatim to
+# $CURL_STDIN_LOG. If the config references the request body via
+# `data-binary = @<path>`, the referenced file's content is appended too, so
+# tests can assert on the body actually sent even though the caller may
+# delete that temp file before the test gets to look at it.
 echo "$*" >> "$CURL_LOG"
+if [ ! -t 0 ]; then
+  stdin_content="$(cat)"
+  {
+    printf '%s\n' "$stdin_content"
+    data_path="$(printf '%s\n' "$stdin_content" | sed -n 's/^data-binary = @//p')"
+    [ -n "$data_path" ] && [ -f "$data_path" ] && cat "$data_path"
+  } >> "${CURL_STDIN_LOG:-/dev/null}"
+fi
 printf '%s\n%s' "${CURL_BODY:-{\"data\":{\"id\":1}\}}" "${CURL_CODE:-201}"

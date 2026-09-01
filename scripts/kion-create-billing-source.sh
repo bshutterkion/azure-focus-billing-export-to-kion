@@ -5,6 +5,17 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
+# Temp files staged below (the curl request body, the tenant-file rewrite)
+# are registered here and removed on any exit path, success or failure.
+CLEANUP_FILES=()
+cleanup() {
+  local f
+  for f in ${CLEANUP_FILES[@]+"${CLEANUP_FILES[@]}"}; do
+    rm -f "$f"
+  done
+}
+trap cleanup EXIT
+
 TENANT_FILE=""; DOMAIN=""; APP_ID=""; CLIENT_SECRET=""
 ENDPOINT=""; CONTAINER=""; PREFIX=""; NAME=""; DRY_RUN=0
 while [ $# -gt 0 ]; do
@@ -58,9 +69,23 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 log_info "creating Kion billing source '$NAME' (account type $ACCOUNT_TYPE_ID)"
-response="$(curl -sS -w '\n%{http_code}' -X POST \
-  -H "Authorization: Bearer $KION_API_KEY" -H "Content-Type: application/json" \
-  -d "$body" "$url")"
+
+# Stage the request body in a temp file so it never appears in the curl
+# command line (readable via `ps` / /proc/<pid>/cmdline for as long as the
+# call is in flight). chmod it before the secret-bearing body is written,
+# and clean it up on any exit path via the trap above.
+body_file="$(mktemp)"
+chmod 600 "$body_file"
+CLEANUP_FILES+=("$body_file")
+printf '%s' "$body" > "$body_file"
+
+# The Authorization header carries the Kion API key. Keep both it and the
+# body off argv by supplying them through a curl config file on stdin.
+response="$(printf '%s\n' \
+    "header = \"Authorization: Bearer ${KION_API_KEY}\"" \
+    "data-binary = @${body_file}" \
+  | curl -sS -w '\n%{http_code}' --config - \
+    -H "Content-Type: application/json" -X POST "$url")"
 http_code="$(echo "$response" | tail -n1)"
 http_body="$(echo "$response" | sed '$d')"
 case "$http_code" in
@@ -69,13 +94,21 @@ case "$http_code" in
 esac
 
 payer_id="$(printf '%s' "$http_body" | jq -r '.data.id // empty' 2>/dev/null || true)"
-if [ -n "$payer_id" ]; then
-  if grep -qE '^[[:space:]]*KION_PAYER_ID=' "$TENANT_FILE"; then
-    tmp="${TENANT_FILE}.tmp.$$"
-    sed "s|^[[:space:]]*KION_PAYER_ID=.*|KION_PAYER_ID=${payer_id}|" "$TENANT_FILE" > "$tmp" \
-      && cat "$tmp" > "$TENANT_FILE" && rm -f "$tmp"
-  else
-    printf 'KION_PAYER_ID=%s\n' "$payer_id" >> "$TENANT_FILE"
-  fi
-  log_info "recorded KION_PAYER_ID=$payer_id in $TENANT_FILE"
+if [ -z "$payer_id" ]; then
+  log_err "Kion accepted the request (HTTP $http_code) and created the billing source, but no payer id could be extracted from its response:"
+  printf '%s\n' "$http_body" >&2
+  log_err "record the payer id in $TENANT_FILE by hand (KION_PAYER_ID=<id>) before re-running this script, or it will attempt to create a duplicate billing source"
+  exit 1
 fi
+
+if grep -qE '^[[:space:]]*KION_PAYER_ID=' "$TENANT_FILE"; then
+  mode="$(stat -f '%Lp' "$TENANT_FILE" 2>/dev/null || stat -c '%a' "$TENANT_FILE" 2>/dev/null || true)"
+  tmp="$(mktemp "${TENANT_FILE}.tmp.XXXXXX")"
+  CLEANUP_FILES+=("$tmp")
+  sed "s|^[[:space:]]*KION_PAYER_ID=.*|KION_PAYER_ID=${payer_id}|" "$TENANT_FILE" > "$tmp"
+  mv "$tmp" "$TENANT_FILE"
+  [ -n "$mode" ] && chmod "$mode" "$TENANT_FILE"
+else
+  printf 'KION_PAYER_ID=%s\n' "$payer_id" >> "$TENANT_FILE"
+fi
+log_info "recorded KION_PAYER_ID=$payer_id in $TENANT_FILE"

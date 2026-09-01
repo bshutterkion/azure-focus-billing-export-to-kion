@@ -8,7 +8,8 @@ setup_test() {
   CURRENT_TEST="$1"; TESTS_RUN=$((TESTS_RUN+1)); TEST_FAILED=0
   TEST_TMP="$(mktemp -d)"
   export TEST_TMP AZ_LOG="$TEST_TMP/az.log" CURL_LOG="$TEST_TMP/curl.log" AZ_STATE="$TEST_TMP/az.state"
-  : > "$AZ_LOG"; : > "$CURL_LOG"; : > "$AZ_STATE"
+  export CURL_STDIN_LOG="$TEST_TMP/curl.stdin"
+  : > "$AZ_LOG"; : > "$CURL_LOG"; : > "$AZ_STATE"; : > "$CURL_STDIN_LOG"
   mkdir -p "$TEST_TMP/bin"
   cp "$HARNESS_DIR/stubs/az" "$HARNESS_DIR/stubs/curl" "$TEST_TMP/bin/"
   chmod +x "$TEST_TMP/bin/az" "$TEST_TMP/bin/curl"
@@ -27,5 +28,7 @@ assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1'"; }
 assert_az_called()     { grep -qE -- "$1" "$AZ_LOG"   || fail "no az call matching: $1"; }
 assert_az_not_called() { grep -qE -- "$1" "$AZ_LOG"   && fail "unexpected az call: $1"; return 0; }
 assert_curl_called()   { grep -qE -- "$1" "$CURL_LOG" || fail "no curl call matching: $1"; }
+assert_curl_argv_lacks() { grep -qF -- "$1" "$CURL_LOG" && fail "curl argv unexpectedly contains: $1"; return 0; }
+assert_curl_stdin_contains() { grep -qF -- "$1" "$CURL_STDIN_LOG" || fail "curl stdin/body missing: $1"; }
 assert_file_contains() { grep -qE -- "$2" "$1" || fail "$1 missing: $2"; }
 finish_tests() { echo; echo "$TESTS_RUN run, $TESTS_FAILED failed"; [ "$TESTS_FAILED" -eq 0 ]; }

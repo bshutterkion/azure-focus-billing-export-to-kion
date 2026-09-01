@@ -23,13 +23,13 @@ teardown_test
 setup_test "uses the MCA gov account type"
 new_tenant_file MCA AzureUSGovernment
 run_bs >/dev/null
-assert_curl_called '"account_type_id":18'
+assert_curl_stdin_contains '"account_type_id":18'
 teardown_test
 
 setup_test "uses the MCA commercial account type"
 new_tenant_file MCA AzureCloud
 run_bs >/dev/null
-assert_curl_called '"account_type_id":16'
+assert_curl_stdin_contains '"account_type_id":16'
 teardown_test
 
 setup_test "skips when the tenant already has a payer id"
@@ -48,6 +48,56 @@ setup_test "non-2xx is a failure"
 new_tenant_file MCA AzureCloud
 export CURL_CODE=403 CURL_BODY='{"message":"denied"}'
 if run_bs >/dev/null 2>"$TEST_TMP/err"; then fail "expected non-zero exit"; fi
+teardown_test
+
+setup_test "keeps the client secret and Kion API key out of curl argv"
+new_tenant_file MCA AzureCloud
+export CURL_BODY='{"data":{"id":9}}' CURL_CODE=201
+KION_HOST=https://kion.example KION_API_KEY=zzz-kion-secret-999 bash "$S" \
+  --tenant-file "$TEST_TMP/t.env" --domain d.onmicrosoft.com --app-id a \
+  --client-secret zzz-client-secret-888 \
+  --endpoint https://sa.blob.core.windows.net/ --container focus --prefix focus >/dev/null
+assert_curl_argv_lacks "zzz-client-secret-888"
+assert_curl_argv_lacks "zzz-kion-secret-999"
+teardown_test
+
+setup_test "request still carries the right body and Authorization header"
+new_tenant_file MCA AzureCloud
+export CURL_BODY='{"data":{"id":9}}' CURL_CODE=201
+KION_HOST=https://kion.example KION_API_KEY=zzz-kion-secret-999 bash "$S" \
+  --tenant-file "$TEST_TMP/t.env" --domain d.onmicrosoft.com --app-id a \
+  --client-secret zzz-client-secret-888 \
+  --endpoint https://sa.blob.core.windows.net/ --container focus --prefix focus >/dev/null
+assert_curl_stdin_contains "Authorization: Bearer zzz-kion-secret-999"
+assert_curl_stdin_contains '"client_secret":"zzz-client-secret-888"'
+assert_curl_stdin_contains '"domain":"d.onmicrosoft.com"'
+teardown_test
+
+setup_test "2xx with no payer id fails loudly and leaves the tenant file untouched"
+new_tenant_file MCA AzureCloud
+before="$(cat "$TEST_TMP/t.env")"
+export CURL_BODY='{"data":{}}' CURL_CODE=201
+set +e
+run_bs >/dev/null 2>"$TEST_TMP/err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "expected non-zero exit when no payer id can be extracted"
+assert_file_contains "$TEST_TMP/err" "$TEST_TMP/t.env"
+after="$(cat "$TEST_TMP/t.env")"
+[ "$before" = "$after" ] || fail "tenant file was modified despite the failure"
+teardown_test
+
+setup_test "write-back preserves the tenant file's mode and other keys"
+new_tenant_file MCA AzureCloud
+# 640, not 600: mktemp's own default mode is 600, so a fixture already at 600
+# would pass even if the fix never restored the original mode at all.
+chmod 640 "$TEST_TMP/t.env"
+export CURL_BODY='{"data":{"id":55}}' CURL_CODE=201
+run_bs >/dev/null
+assert_eq "$(stat -f '%Lp' "$TEST_TMP/t.env" 2>/dev/null || stat -c '%a' "$TEST_TMP/t.env")" "640"
+assert_file_contains "$TEST_TMP/t.env" "KION_PAYER_ID=55"
+assert_file_contains "$TEST_TMP/t.env" "TENANT_ID=t-1"
+assert_file_contains "$TEST_TMP/t.env" "BILLING_MODEL=MCA"
 teardown_test
 
 finish_tests
