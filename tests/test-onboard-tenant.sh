@@ -12,6 +12,7 @@ RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
 LOCATION=usgovvirginia
+EXPORT_SCOPE=subscription
 KION_PAYER_ID=
 EOF
 }
@@ -61,6 +62,7 @@ RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
 LOCATION=usgovvirginia
+EXPORT_SCOPE=subscription
 KION_PAYER_ID=
 EOF
 az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
@@ -112,6 +114,7 @@ RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
 LOCATION=usgovvirginia
+EXPORT_SCOPE=subscription
 EXPORT_API_VERSION=2025-03-01
 KION_PAYER_ID=
 EOF
@@ -159,6 +162,10 @@ KION_HOST=https://k KION_API_KEY=k \
   bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login --only kion-source >/dev/null
 assert_az_not_called "rest --method put"
 assert_curl_called "/v1/payer/standalone"
+# Step 3 (which normally reports KION_PREFIX) was skipped entirely, so this
+# proves the --print-only recompute path in onboard-tenant.sh still gets the
+# right value to the billing source, without ever touching Azure.
+assert_curl_stdin_contains '"focus_storage_prefix":"focus/sub-a/kion-focus-sub-a"'
 teardown_test
 
 setup_test "rejects an unknown --only value"
@@ -171,6 +178,77 @@ fi
 # itself is an unrecognized flag (that failure mode also mentions "only" and
 # would pass before the flag exists at all).
 assert_file_contains "$TEST_TMP/err" "exports.*kion-source"
+teardown_test
+
+setup_test "passes the exact KION_PREFIX from create-focus-exports.sh to kion-create-billing-source.sh (subscription scope)"
+write_tenant
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "sub-a"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP"
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null
+# The bare EXPORT_PREFIX ("focus") would search a path that never has any
+# data (Azure inserts the export name below rootFolderPath); the billing
+# source must instead be pointed at "<rootFolderPath>/<export-name>".
+assert_curl_stdin_contains '"focus_storage_prefix":"focus/sub-a/kion-focus-sub-a"'
+teardown_test
+
+setup_test "passes the exact KION_PREFIX from create-focus-exports.sh to kion-create-billing-source.sh (billing scope)"
+cat > "$TEST_TMP/t.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureUSGovernment
+BILLING_MODEL=MCA
+RESOURCE_GROUP=rg
+STORAGE_ACCOUNT=sa
+CONTAINER=focus
+LOCATION=usgovvirginia
+EXPORT_SCOPE=billingAccount
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
+KION_PAYER_ID=
+EOF
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP"
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null
+assert_curl_stdin_contains '"focus_storage_prefix":"focus/ba/kion-focus-ba"'
+teardown_test
+
+setup_test "EXPORT_SCOPE defaults to billingAccount when the tenant file omits it"
+cat > "$TEST_TMP/t.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureUSGovernment
+BILLING_MODEL=MCA
+RESOURCE_GROUP=rg
+STORAGE_ACCOUNT=sa
+CONTAINER=focus
+LOCATION=usgovvirginia
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
+KION_PAYER_ID=
+EOF
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP"
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null
+assert_az_called "billingAccounts/ba/providers/Microsoft.CostManagement/exports"
+assert_az_not_called "account list"
+teardown_test
+
+setup_test "EXPORT_SCOPE=subscription with more than one subscription aborts before touching Kion"
+write_tenant
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "sub-a,sub-b"
+cd "$TEST_TMP"
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "sub-a"
+assert_file_contains "$TEST_TMP/err" "sub-b"
+assert_az_not_called "rest --method put"
+[ -s "$TEST_TMP/curl.log" ] && fail "must not register a billing source when exports were never created"
 teardown_test
 
 finish_tests

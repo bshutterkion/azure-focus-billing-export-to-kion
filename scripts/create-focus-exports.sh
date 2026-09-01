@@ -9,6 +9,15 @@
 # `az costmanagement export create` cannot create FOCUS exports (it accepts
 # only ActualCost, AmortizedCost and Usage), so this uses `az rest`, which
 # reuses the CLI's existing auth.
+#
+# Output: progress goes to stderr. On success, stdout carries, per export
+# created (or, with --print-only, per export that *would* be created):
+#   <export name>            (omitted with --print-only)
+#   KION_PREFIX=<value>
+# KION_PREFIX is the prefix Kion's billing source must be pointed at: Azure
+# inserts the export name itself as a folder below rootFolderPath, so the
+# value is always "<rootFolderPath>/<export name>", never the bare
+# rootFolderPath a caller might otherwise guess at.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -16,6 +25,7 @@ STORAGE_ID=""; CONTAINER=""; PREFIX="focus"
 SCOPE="subscription"; BILLING_SCOPE_ID=""; SUBSCRIPTIONS=""
 FOCUS_VERSION="1.0"; RECURRENCE="Daily"; TIMEFRAME="MonthToDate"
 API_VERSION="2025-03-01"
+PRINT_ONLY=0; NO_RUN_NOW=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,6 +39,8 @@ while [ $# -gt 0 ]; do
     --recurrence)         RECURRENCE="$2"; shift 2 ;;
     --timeframe)          TIMEFRAME="$2"; shift 2 ;;
     --api-version)        API_VERSION="$2"; shift 2 ;;
+    --print-only)         PRINT_ONLY=1; shift ;;
+    --no-run-now)         NO_RUN_NOW=1; shift ;;
     *) log_err "unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -44,9 +56,23 @@ case "$SCOPE" in
     if [ -z "$SUBSCRIPTIONS" ]; then
       SUBSCRIPTIONS="$(az account list --query "[].id" -o tsv | tr '\n' ' ')"
     fi
+    found=""; count=0
     for s in $SUBSCRIPTIONS; do
-      [ -n "$s" ] && SCOPES="$SCOPES subscriptions/$s"
+      [ -n "$s" ] || continue
+      SCOPES="$SCOPES subscriptions/$s"
+      found="$found $s"
+      count=$((count + 1))
     done
+    # Kion keeps only the newest manifest under a billing source's prefix, so
+    # N subscription exports produce N manifests and Kion ingests exactly
+    # one: the other N-1 subscriptions' costs vanish with no error anywhere.
+    # Fail loudly before creating anything rather than risk missing money in
+    # a customer's bill.
+    if [ "$count" -gt 1 ]; then
+      log_err "EXPORT_SCOPE=subscription resolved to $count subscriptions:$found"
+      log_err "one Kion billing source can consume only one export; set EXPORT_SCOPE=billingAccount (or billingProfile) with BILLING_SCOPE_ID for a tenant with more than one subscription"
+      exit 1
+    fi
     ;;
   billingProfile|billingAccount)
     [ -n "$BILLING_SCOPE_ID" ] || { log_err "--billing-scope-id is required for scope '$SCOPE'"; exit 2; }
@@ -59,12 +85,44 @@ esac
 START="$(date -u +%Y-%m-%d)T00:00:00Z"
 END="$(date -u -v+5y +%Y-%m-%d 2>/dev/null || date -u -d '+5 years' +%Y-%m-%d)T00:00:00Z"
 
+# sanitize_leaf — a billing account/profile id (the scope's leaf) can carry
+# characters an Azure resource name cannot, e.g. MCA's
+# "<account-guid>:<profile-guid>_<date>". Keep alphanumerics, hyphens and
+# underscores; replace everything else with a hyphen. Deterministic, so a
+# re-run updates the same export instead of creating a duplicate.
+sanitize_leaf() {
+  printf '%s' "$1" | sed 's/[^A-Za-z0-9_-]/-/g'
+}
+
+# Azure does not publish a hard length limit for Cost Management export
+# names, but the name becomes a blob path segment, so keep it well inside
+# every observed/recommended ceiling.
+MAX_EXPORT_NAME_LEN=64
+NAME_PREFIX="kion-focus-"
+
 for scope in $SCOPES; do
   leaf="${scope##*/}"
-  name="kion-focus-${leaf}"
+  safe_leaf="$(sanitize_leaf "$leaf")"
+  name="${NAME_PREFIX}${safe_leaf}"
+  if [ "${#name}" -gt "$MAX_EXPORT_NAME_LEN" ]; then
+    keep=$((MAX_EXPORT_NAME_LEN - ${#NAME_PREFIX}))
+    safe_leaf="${safe_leaf:0:$keep}"
+    name="${NAME_PREFIX}${safe_leaf}"
+  fi
+  # rootFolderPath uses the same sanitized, possibly-truncated leaf as the
+  # export name, so KION_PREFIX ("$root/$name") is always exactly what Azure
+  # will actually write to, never a guess built from the raw, unsafe leaf.
+  root="$PREFIX/$safe_leaf"
+  kion_prefix="$root/$name"
+
+  if [ "$PRINT_ONLY" -eq 1 ]; then
+    echo "KION_PREFIX=$kion_prefix"
+    continue
+  fi
+
   body="$(jq -nc \
     --arg rec "$RECURRENCE" --arg from "$START" --arg to "$END" \
-    --arg sid "$STORAGE_ID" --arg cont "$CONTAINER" --arg root "$PREFIX/$leaf" \
+    --arg sid "$STORAGE_ID" --arg cont "$CONTAINER" --arg root "$root" \
     --arg tf "$TIMEFRAME" --arg ver "$FOCUS_VERSION" \
     '{properties:{
         schedule:{status:"Active", recurrence:$rec,
@@ -80,8 +138,24 @@ for scope in $SCOPES; do
   log_info "creating FOCUS export '$name' at $scope"
   if az rest --method put --url "$url" --body "$body" --only-show-errors >/dev/null; then
     echo "$name"
+    echo "KION_PREFIX=$kion_prefix"
   else
     log_err "failed to create export '$name' at $scope"
     exit 1
+  fi
+
+  if [ "$NO_RUN_NOW" -eq 1 ]; then
+    continue
+  fi
+  # Trigger an on-demand run: a newly created export's nextRunTimeEstimate is
+  # about a day out, so without this an operator finishes onboarding and sees
+  # nothing in Kion until the next day, indistinguishable from a broken
+  # setup. A failed kick-off is a warning, not an error: the export exists
+  # and will run on its normal schedule regardless.
+  run_url="${ARM_ENDPOINT}/${scope}/providers/Microsoft.CostManagement/exports/${name}/run?api-version=${API_VERSION}"
+  if az rest --method post --url "$run_url" --only-show-errors >/dev/null; then
+    log_info "triggered an on-demand run for '$name'"
+  else
+    log_warn "could not trigger an on-demand run for '$name'; it will still run on its normal schedule"
   fi
 done
