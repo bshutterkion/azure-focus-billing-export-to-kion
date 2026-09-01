@@ -91,6 +91,7 @@ case "$SCOPE" in
     if [ "$count" -gt 1 ]; then
       log_err "EXPORT_SCOPE=subscription resolved to $count subscriptions:$found"
       log_err "one Kion billing source can consume only one export; set EXPORT_SCOPE=billingAccount (or billingProfile) with BILLING_SCOPE_ID for a tenant with more than one subscription"
+      log_err "billing scopes require an MCA or EA billing account. A CSP (Microsoft Partner Agreement) customer tenant does not support them: its only tenant-wide FOCUS scope is Customer scope, which lives in the partner tenant and is not reachable from here. A multi-subscription CSP tenant cannot be onboarded with this tool -- use the Partner Center pipeline instead."
       exit 1
     fi
     ;;

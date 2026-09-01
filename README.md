@@ -30,10 +30,33 @@ Or every tenant in `tenants/`, continuing past failures and printing a summary:
     make onboard-all
 
 Each run logs in to the tenant, creates the resource group / storage account /
-container if missing, creates one FOCUS export per subscription (or one at a
-billing scope for MCA), creates the Kion app with the permissions Kion needs,
+container if missing, creates a single FOCUS export covering the whole tenant at
+billing-account scope, creates the Kion app with the permissions Kion needs,
 and registers the billing source — recording the payer id back into the
 tenant's file so a later run leaves it alone.
+
+One export per billing source is a hard constraint, not a preference: a Kion
+billing source is added at the tenant level and carries exactly one FOCUS
+storage endpoint, container and prefix, and Kion ingests only the single newest
+manifest found under that prefix. A tenant that produced one export per
+subscription would therefore have all but one subscription's costs silently
+dropped, which is why `subscription` scope is refused for a tenant with more
+than one subscription.
+
+## Which tenants this tool can onboard
+
+| Agreement | Tenant-wide FOCUS scope | Supported here |
+|---|---|---|
+| MCA | billing account / billing profile | Yes |
+| EA | billing account (enrollment) | Yes |
+| CSP (Microsoft Partner Agreement) | Customer scope only | Only if the tenant has exactly one subscription |
+
+Azure does not offer billing-account or billing-profile FOCUS exports under a
+Microsoft Partner Agreement. A CSP customer tenant's only tenant-wide scope is
+Customer scope, which lives in the *partner's* tenant and needs Admin agent or
+billing admin there — not reachable from a sign-in to the customer tenant. So a
+CSP customer with more than one subscription cannot be onboarded with this tool;
+that case is what the Partner Center converter pipeline exists for.
 
 Every step is idempotent, so re-running after a failure resumes rather than
 duplicating.
