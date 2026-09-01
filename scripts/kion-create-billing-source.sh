@@ -41,7 +41,13 @@ KION_API_BASE="${KION_API_BASE:-/api}"
 
 EXISTING="$(cfg_get "$TENANT_FILE" KION_PAYER_ID)"
 if [ -n "$EXISTING" ]; then
-  log_info "billing source already exists (payer $EXISTING); leaving it alone"
+  # Kion has no API for editing an existing Azure billing source (only the
+  # Kion UI can), so there is no update path to attempt here. Warn loudly
+  # instead of quietly declaring success: without this, a tenant onboarded
+  # before the prefix bug was fixed stays pointed at a broken prefix forever,
+  # and every re-run reports success without ever saying so.
+  log_warn "billing source already exists (payer $EXISTING); its FOCUS prefix was NOT updated"
+  log_warn "set focus_storage_prefix=$PREFIX on payer $EXISTING in the Kion UI (Kion has no API for editing an existing Azure billing source)"
   exit 0
 fi
 
@@ -107,7 +113,17 @@ if grep -qE '^[[:space:]]*KION_PAYER_ID=' "$TENANT_FILE"; then
   CLEANUP_FILES+=("$tmp")
   sed "s|^[[:space:]]*KION_PAYER_ID=.*|KION_PAYER_ID=${payer_id}|" "$TENANT_FILE" > "$tmp"
   mv "$tmp" "$TENANT_FILE"
-  [ -n "$mode" ] && chmod "$mode" "$TENANT_FILE"
+  # The write-back above already succeeded and is atomic (mktemp+sed+mv). A
+  # missing/unreadable mode (stat failed on both -f and -c forms) must not
+  # fail the whole script here: skip the chmod, don't guard it with a bare
+  # `[ -n "$mode" ] && chmod ...`, which relies on bash's easy-to-doubt
+  # `&&`-list set -e exemption (the guard's own failure never propagates,
+  # since chmod is the command actually checked, and it's simply never run).
+  # An explicit if makes the "skip on missing mode" intent unambiguous
+  # instead of resting on that idiom.
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$TENANT_FILE"
+  fi
 else
   printf 'KION_PAYER_ID=%s\n' "$payer_id" >> "$TENANT_FILE"
 fi

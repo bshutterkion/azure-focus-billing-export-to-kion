@@ -4,51 +4,60 @@ set -uo pipefail
 S="$REPO_DIR/scripts/create-focus-exports.sh"
 SAID="/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/sa"
 
+# Bare GUID-shaped subscription id fixtures. Subscription ids are always
+# 8-4-4-4-12 hex tokens, never placeholders like "sub-a" — using real-shaped
+# values here is what lets the item-3 GUID-shape guard run against these
+# fixtures instead of having to special-case them.
+SUB_A="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+SUB_B="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+SUB_X="cccccccc-cccc-cccc-cccc-cccccccccccc"
+SUB_Y="dddddddd-dddd-dddd-dddd-dddddddddddd"
+
 setup_test "subscription scope with more than one subscription fails hard and creates nothing"
 if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-   --subscriptions "sub-a sub-b" >/dev/null 2>"$TEST_TMP/err"; then fail "expected non-zero exit"; fi
-assert_file_contains "$TEST_TMP/err" "sub-a"
-assert_file_contains "$TEST_TMP/err" "sub-b"
+   --subscriptions "$SUB_A $SUB_B" >/dev/null 2>"$TEST_TMP/err"; then fail "expected non-zero exit"; fi
+assert_file_contains "$TEST_TMP/err" "$SUB_A"
+assert_file_contains "$TEST_TMP/err" "$SUB_B"
 assert_file_contains "$TEST_TMP/err" "billingAccount"
 assert_az_not_called "rest --method put"
 teardown_test
 
 setup_test "subscription scope with exactly one subscription still succeeds"
 bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-  --subscriptions "sub-a" >/dev/null
+  --subscriptions "$SUB_A" >/dev/null
 rc=$?
 assert_eq "$rc" "0"
 assert_az_called "rest --method put"
 teardown_test
 
 setup_test "auto-enumerated subscriptions also trigger the hard fail"
-az_state SUBSCRIPTIONS "sub-x,sub-y"
+az_state SUBSCRIPTIONS "$SUB_X,$SUB_Y"
 if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus >/dev/null 2>"$TEST_TMP/err"; then
   fail "expected non-zero exit"
 fi
-assert_file_contains "$TEST_TMP/err" "sub-x"
-assert_file_contains "$TEST_TMP/err" "sub-y"
+assert_file_contains "$TEST_TMP/err" "$SUB_X"
+assert_file_contains "$TEST_TMP/err" "$SUB_Y"
 assert_az_not_called "rest --method put"
 teardown_test
 
 setup_test "export body requests FocusCost, not actual or amortized"
 bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-  --subscriptions "sub-a" >/dev/null
+  --subscriptions "$SUB_A" >/dev/null
 assert_file_contains "$TEST_TMP/az.log" "FocusCost"
 grep -qE "ActualCost|AmortizedCost" "$TEST_TMP/az.log" && fail "must not request legacy dataset types"
 teardown_test
 
 setup_test "body carries version, recurrence and timeframe"
 bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-  --subscriptions "sub-a" --focus-version 1.2-preview --recurrence Daily --timeframe MonthToDate >/dev/null
+  --subscriptions "$SUB_A" --focus-version 1.2-preview --recurrence Daily --timeframe MonthToDate >/dev/null
 assert_file_contains "$TEST_TMP/az.log" "1.2-preview"
 assert_file_contains "$TEST_TMP/az.log" "MonthToDate"
 teardown_test
 
 setup_test "prefix nests per subscription"
 bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-  --subscriptions "sub-a" >/dev/null
-assert_file_contains "$TEST_TMP/az.log" "focus/sub-a"
+  --subscriptions "$SUB_A" >/dev/null
+assert_file_contains "$TEST_TMP/az.log" "focus/$SUB_A"
 teardown_test
 
 setup_test "billingProfile scope creates a single export"
@@ -59,10 +68,10 @@ assert_eq "$(grep -c 'rest --method put' "$TEST_TMP/az.log")" "1"
 teardown_test
 
 setup_test "enumerates a single subscription when none are given"
-az_state SUBSCRIPTIONS "sub-x"
+az_state SUBSCRIPTIONS "$SUB_X"
 bash "$S" --storage-account-id "$SAID" --container focus --prefix focus >/dev/null
 assert_az_called "account list"
-assert_az_called "subscriptions/sub-x/providers"
+assert_az_called "subscriptions/$SUB_X/providers"
 teardown_test
 
 setup_test "non-subscription scope requires a billing scope id"
@@ -76,21 +85,21 @@ teardown_test
 # "enhanced exports" api-version, so the default must not be 2023-08-01.
 setup_test "defaults to api-version 2025-03-01, the first version that accepts FocusCost"
 bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-  --subscriptions "sub-a" >/dev/null
+  --subscriptions "$SUB_A" >/dev/null
 assert_az_called "api-version=2025-03-01"
 teardown_test
 
 setup_test "--api-version overrides the default"
 bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-  --subscriptions "sub-a" --api-version 2023-08-01 >/dev/null
+  --subscriptions "$SUB_A" --api-version 2023-08-01 >/dev/null
 assert_az_called "api-version=2023-08-01"
 grep -q "api-version=2025-03-01" "$TEST_TMP/az.log" && fail "override did not reach the url; default leaked through"
 teardown_test
 
 setup_test "KION_PREFIX equals rootFolderPath/export-name for a subscription-scope export"
-OUT="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "sub-a")"
+OUT="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "$SUB_A")"
 KION_PREFIX="$(printf '%s\n' "$OUT" | sed -n 's/^KION_PREFIX=//p')"
-assert_eq "$KION_PREFIX" "focus/sub-a/kion-focus-sub-a"
+assert_eq "$KION_PREFIX" "focus/$SUB_A/kion-focus-$SUB_A"
 teardown_test
 
 setup_test "KION_PREFIX equals rootFolderPath/export-name for a billing-scope export"
@@ -101,17 +110,23 @@ assert_eq "$KION_PREFIX" "focus/bp/kion-focus-bp"
 teardown_test
 
 setup_test "--print-only reports KION_PREFIX without creating or running anything"
-OUT="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "sub-a" --print-only)"
+OUT="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "$SUB_A" --print-only)"
 assert_az_not_called "rest --method put"
 assert_az_not_called "rest --method post"
 KION_PREFIX="$(printf '%s\n' "$OUT" | sed -n 's/^KION_PREFIX=//p')"
-assert_eq "$KION_PREFIX" "focus/sub-a/kion-focus-sub-a"
+assert_eq "$KION_PREFIX" "focus/$SUB_A/kion-focus-$SUB_A"
 teardown_test
 
 setup_test "--print-only still hard-fails when subscription scope has more than one subscription"
 if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
-   --subscriptions "sub-a sub-b" --print-only >/dev/null 2>"$TEST_TMP/err"; then fail "expected non-zero exit"; fi
-assert_az_not_called "rest --method put"
+   --subscriptions "$SUB_A $SUB_B" --print-only >/dev/null 2>"$TEST_TMP/err"; then fail "expected non-zero exit"; fi
+# Not `assert_az_not_called "rest --method put"` here: --print-only never PUTs
+# on any code path, guard present or not, so that assertion would pass even if
+# the multi-subscription guard were deleted entirely. Assert on the actual
+# guard behavior instead: the exit code above, and that the error names both
+# offending subscriptions (mirroring the non-print-only test above).
+assert_file_contains "$TEST_TMP/err" "$SUB_A"
+assert_file_contains "$TEST_TMP/err" "$SUB_B"
 teardown_test
 
 setup_test "an MCA billing account id with a colon produces a valid, deterministic export name"
@@ -119,16 +134,72 @@ MCA_ID="12345678-1234-1234-1234-123456789012:87654321-4321-4321-4321-21098765432
 OUT1="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
   --scope billingAccount --billing-scope-id "/providers/Microsoft.Billing/billingAccounts/$MCA_ID")"
 NAME1="$(printf '%s\n' "$OUT1" | sed -n '1p')"
+KION_PREFIX1="$(printf '%s\n' "$OUT1" | sed -n 's/^KION_PREFIX=//p')"
 OUT2="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
   --scope billingAccount --billing-scope-id "/providers/Microsoft.Billing/billingAccounts/$MCA_ID")"
 NAME2="$(printf '%s\n' "$OUT2" | sed -n '1p')"
 assert_eq "$NAME1" "$NAME2"
 printf '%s' "$NAME1" | grep -qE '^[A-Za-z0-9_-]+$' || fail "export name '$NAME1' contains characters Azure resource names can't carry"
 [ "${#NAME1}" -le 64 ] || fail "export name '$NAME1' is ${#NAME1} chars, over the 64-char limit"
+# Pin KION_PREFIX to the rootFolderPath actually recorded in the PUT body (not
+# to an internally-recomputed value), so a break that desynchronizes the
+# truncated leaf used for rootFolderPath from the one used for KION_PREFIX is
+# caught. Both bash invocations in this test PUT the identical body, so the
+# first recorded PUT line is representative.
+recorded_root="$(grep -m1 'rest --method put' "$TEST_TMP/az.log" | grep -o '"rootFolderPath":"[^"]*"' | sed 's/.*:"//;s/"$//')"
+[ -n "$recorded_root" ] || fail "no rootFolderPath recorded in az.log"
+assert_eq "$KION_PREFIX1" "$recorded_root/$NAME1"
+teardown_test
+
+setup_test "--prefix with a trailing slash produces the same KION_PREFIX as without one"
+OUT1="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix "focus/" --subscriptions "$SUB_A" --print-only)"
+OUT2="$(bash "$S" --storage-account-id "$SAID" --container focus --prefix "focus" --subscriptions "$SUB_A" --print-only)"
+KP1="$(printf '%s\n' "$OUT1" | sed -n 's/^KION_PREFIX=//p')"
+KP2="$(printf '%s\n' "$OUT2" | sed -n 's/^KION_PREFIX=//p')"
+assert_eq "$KP1" "$KP2"
+assert_eq "$KP1" "focus/$SUB_A/kion-focus-$SUB_A"
+teardown_test
+
+setup_test "billingAccount scope rejects a value shaped like a subscription instead"
+if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+   --scope billingAccount --billing-scope-id "/subscriptions/$SUB_A" >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "billingAccount"
+assert_file_contains "$TEST_TMP/err" "$SUB_A"
+assert_az_not_called "rest --method put"
+teardown_test
+
+setup_test "billingProfile scope rejects a billing-scope-id missing the billingProfiles segment"
+if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+   --scope billingProfile --billing-scope-id "/providers/Microsoft.Billing/billingAccounts/ba" >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "billingProfile"
+assert_file_contains "$TEST_TMP/err" "billingAccounts/ba"
+assert_az_not_called "rest --method put"
+teardown_test
+
+setup_test "subscriptions rejects a comma-joined value instead of miscounting it as one"
+if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+   --subscriptions "$SUB_A,$SUB_B" >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "$SUB_A,$SUB_B"
+assert_az_not_called "rest --method put"
+teardown_test
+
+setup_test "subscriptions rejects a malformed subscription id"
+if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+   --subscriptions "not-a-guid" >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "not-a-guid"
+assert_az_not_called "rest --method put"
 teardown_test
 
 setup_test "run-now POST is issued after the export PUT"
-bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "sub-a" >/dev/null
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "$SUB_A" >/dev/null
 put_line="$(grep -n 'method put' "$TEST_TMP/az.log" | head -1 | cut -d: -f1)"
 run_line="$(grep -n 'run?api-version' "$TEST_TMP/az.log" | head -1 | cut -d: -f1)"
 [ -n "$put_line" ] || fail "PUT was not recorded"
@@ -138,14 +209,14 @@ assert_az_called 'rest --method post.*run\?api-version'
 teardown_test
 
 setup_test "--no-run-now skips triggering an on-demand run"
-bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "sub-a" --no-run-now >/dev/null
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "$SUB_A" --no-run-now >/dev/null
 assert_az_called "rest --method put"
 assert_az_not_called 'run\?api-version'
 teardown_test
 
 setup_test "a failing run-now POST is a warning, not an error"
 export AZ_FAIL_MATCH='run\?api-version'
-bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "sub-a" >/dev/null 2>"$TEST_TMP/err"
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus --subscriptions "$SUB_A" >/dev/null 2>"$TEST_TMP/err"
 rc=$?
 unset AZ_FAIL_MATCH
 assert_eq "$rc" "0"

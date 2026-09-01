@@ -47,6 +47,15 @@ done
 [ -n "$STORAGE_ID" ] && [ -n "$CONTAINER" ] || {
   log_err "--storage-account-id and --container are required"; exit 2; }
 
+# Strip trailing slashes so "--prefix focus/" and "--prefix focus" produce an
+# identical rootFolderPath/KION_PREFIX. A trailing empty path segment is not
+# guaranteed to survive Azure's own path handling untouched, and Defect 1
+# (Task 9) would otherwise return via exactly this kind of hand-edited-.env
+# trailing slash.
+while [ "${PREFIX%/}" != "$PREFIX" ]; do
+  PREFIX="${PREFIX%/}"
+done
+
 resolve_cloud
 
 # Scopes to export at. Management group scope is not supported for FOCUS.
@@ -57,8 +66,19 @@ case "$SCOPE" in
       SUBSCRIPTIONS="$(az account list --query "[].id" -o tsv | tr '\n' ' ')"
     fi
     found=""; count=0
+    # Every entry must be a bare GUID: subscription ids never carry commas or
+    # other separators. Rejecting anything else catches
+    # --subscriptions "sub-a,sub-b" (a single shell word, so the loop below
+    # would otherwise count it as one subscription and PUT to a nonsense
+    # "subscriptions/sub-a,sub-b" scope) before it ever reaches the guard
+    # whose entire purpose is "never more than one subscription".
+    guid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     for s in $SUBSCRIPTIONS; do
       [ -n "$s" ] || continue
+      if [[ ! "$s" =~ $guid_re ]]; then
+        log_err "malformed subscription id '$s': expected a bare GUID (8-4-4-4-12 hex characters)"
+        exit 1
+      fi
       SCOPES="$SCOPES subscriptions/$s"
       found="$found $s"
       count=$((count + 1))
@@ -76,7 +96,28 @@ case "$SCOPE" in
     ;;
   billingProfile|billingAccount)
     [ -n "$BILLING_SCOPE_ID" ] || { log_err "--billing-scope-id is required for scope '$SCOPE'"; exit 2; }
-    SCOPES="${BILLING_SCOPE_ID#/}"
+    # Validate that the resolved scope is actually shaped like the scope the
+    # caller declared. Without this, --scope billingAccount --billing-scope-id
+    # /subscriptions/<id> (or any other string) silently creates a
+    # subscription-scoped export instead: exactly the money-losing failure
+    # mode the subscription-count guard above exists to prevent, reached
+    # through the path that is now the default and whose value is hand-typed.
+    normalized="${BILLING_SCOPE_ID#/}"
+    case "$SCOPE" in
+      billingAccount)
+        shape_re='^providers/Microsoft\.Billing/billingAccounts/[^/]+$'
+        shape_desc="providers/Microsoft.Billing/billingAccounts/<id>"
+        ;;
+      billingProfile)
+        shape_re='^providers/Microsoft\.Billing/billingAccounts/[^/]+/billingProfiles/[^/]+$'
+        shape_desc="providers/Microsoft.Billing/billingAccounts/<id>/billingProfiles/<id>"
+        ;;
+    esac
+    if [[ ! "$normalized" =~ $shape_re ]]; then
+      log_err "scope '$SCOPE' requires --billing-scope-id shaped like $shape_desc; got '$BILLING_SCOPE_ID'"
+      exit 1
+    fi
+    SCOPES="$normalized"
     ;;
   *) log_err "unknown scope '$SCOPE'"; exit 2 ;;
 esac

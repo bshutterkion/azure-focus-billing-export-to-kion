@@ -34,8 +34,20 @@ teardown_test
 
 setup_test "skips when the tenant already has a payer id"
 printf 'TENANT_ID=t-1\nBILLING_MODEL=MCA\nAZURE_CLOUD=AzureCloud\nKION_PAYER_ID=42\n' > "$TEST_TMP/t.env"
-run_bs >/dev/null
+set +e
+run_bs >/dev/null 2>"$TEST_TMP/err"
+rc=$?
+set -e
+assert_eq "$rc" "0"
 [ -s "$TEST_TMP/curl.log" ] && fail "should not have called kion"
+# The warning must be actionable without re-deriving anything: it has to name
+# the existing payer id and the correct prefix, and say plainly that the
+# prefix was not updated (Kion has no API for editing an existing Azure
+# billing source, so this warning is the only place an operator learns to go
+# set it in the Kion UI).
+assert_file_contains "$TEST_TMP/err" "42"
+assert_file_contains "$TEST_TMP/err" "focus"
+assert_file_contains "$TEST_TMP/err" "NOT updated"
 teardown_test
 
 setup_test "dry run posts nothing"
@@ -98,6 +110,27 @@ assert_eq "$(stat -f '%Lp' "$TEST_TMP/t.env" 2>/dev/null || stat -c '%a' "$TEST_
 assert_file_contains "$TEST_TMP/t.env" "KION_PAYER_ID=55"
 assert_file_contains "$TEST_TMP/t.env" "TENANT_ID=t-1"
 assert_file_contains "$TEST_TMP/t.env" "BILLING_MODEL=MCA"
+teardown_test
+
+setup_test "a stat that produces nothing does not fail the script after a successful write-back"
+new_tenant_file MCA AzureCloud
+# Fake stat: always fails with no output, on both the BSD (-f) and GNU (-c)
+# forms kion-create-billing-source.sh tries. $TEST_TMP/bin is already first
+# on PATH (harness.sh puts the az/curl stubs there), so this fake is found
+# before the real stat for this test only; no other test is affected.
+cat > "$TEST_TMP/bin/stat" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+chmod +x "$TEST_TMP/bin/stat"
+export CURL_BODY='{"data":{"id":99}}' CURL_CODE=201
+set +e
+run_bs >/dev/null 2>"$TEST_TMP/err"
+rc=$?
+set -e
+assert_eq "$rc" "0"
+assert_file_contains "$TEST_TMP/err" "recorded KION_PAYER_ID=99"
+assert_file_contains "$TEST_TMP/t.env" "KION_PAYER_ID=99"
 teardown_test
 
 finish_tests
