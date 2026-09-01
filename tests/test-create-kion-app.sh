@@ -61,4 +61,18 @@ bash "$S" --resource-group rg --storage-account sa --container focus >/dev/null 
 assert_file_contains "$TEST_TMP/err" "WARNING.*domain from Microsoft Graph"
 teardown_test
 
+setup_test "prints default FOCUS prefix in summary"
+az_state APP_ID "app-42"; az_state SP_OID "sp-1"; az_state TENANT_ID "t-1"; az_state BLOB_ENDPOINT "https://example.blob.core.windows.net"
+cd "$TEST_TMP"
+bash "$S" --resource-group rg --storage-account sa --container focus >/dev/null 2>"$TEST_TMP/stderr"
+assert_file_contains "$TEST_TMP/stderr" "FOCUS prefix:.*focus"
+teardown_test
+
+setup_test "respects --prefix flag in summary"
+az_state APP_ID "app-42"; az_state SP_OID "sp-1"; az_state TENANT_ID "t-1"; az_state BLOB_ENDPOINT "https://example.blob.core.windows.net"
+cd "$TEST_TMP"
+bash "$S" --prefix custom/path --resource-group rg --storage-account sa --container focus >/dev/null 2>"$TEST_TMP/stderr"
+assert_file_contains "$TEST_TMP/stderr" "FOCUS prefix:.*custom/path"
+teardown_test
+
 finish_tests

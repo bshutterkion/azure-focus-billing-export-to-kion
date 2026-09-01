@@ -54,6 +54,7 @@
 #   --resource-group <rg>    Resource group holding the FOCUS storage account
 #   --storage-account <sa>   FOCUS storage account
 #   --container <name>       FOCUS container to grant Storage Blob Data Reader on
+#   --prefix <path>          Export prefix for FOCUS data (default: "focus")
 #   --enable-subscription-creation
 #                            Also create/assign the "Minimal subscription move"
 #                            custom role so Kion can create subscriptions + RGs
@@ -74,6 +75,7 @@ MANAGEMENT_GROUP=""
 RG=""
 STORAGE=""
 CONTAINER=""
+EXPORT_PREFIX="focus"
 ENABLE_SUB_CREATION=0
 ROTATION_PERMS=0
 DO_GRAPH=1
@@ -91,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --resource-group)     RG="$2"; shift 2 ;;
     --storage-account)    STORAGE="$2"; shift 2 ;;
     --container)          CONTAINER="$2"; shift 2 ;;
+    --prefix)             EXPORT_PREFIX="$2"; shift 2 ;;
     --enable-subscription-creation) ENABLE_SUB_CREATION=1; shift ;;
     --rotation-perms)     ROTATION_PERMS=1; shift ;;
     --no-graph)           DO_GRAPH=0; shift ;;
@@ -314,7 +317,8 @@ EOF
 [[ -n "$BLOB_ENDPOINT" ]] && cat <<EOF >&2
 FOCUS endpoint:   $BLOB_ENDPOINT
 FOCUS container:  $CONTAINER
-FOCUS prefix:     focus/$TENANT_ID
+FOCUS prefix:     $EXPORT_PREFIX
+                  (each subscription's data sits in <prefix>/<subscription-id>/)
 EOF
 cat <<EOF >&2
 
