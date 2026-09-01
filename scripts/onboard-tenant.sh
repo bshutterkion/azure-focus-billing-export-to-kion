@@ -6,15 +6,20 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/common.sh"
 
-TENANT_FILE=""; SKIP_LOGIN=0
+TENANT_FILE=""; SKIP_LOGIN=0; ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --tenant-file) TENANT_FILE="$2"; shift 2 ;;
     --skip-login)  SKIP_LOGIN=1; shift ;;
+    --only)        ONLY="$2"; shift 2 ;;
     *) log_err "unknown argument: $1"; exit 2 ;;
   esac
 done
 [ -n "$TENANT_FILE" ] && [ -f "$TENANT_FILE" ] || { log_err "tenant file not found: $TENANT_FILE"; exit 2; }
+case "$ONLY" in
+  ""|exports|kion-source) : ;;
+  *) log_err "--only must be 'exports' or 'kion-source', got '$ONLY'"; exit 2 ;;
+esac
 
 TENANT_ID="$(cfg_get "$TENANT_FILE" TENANT_ID)"
 [ -n "$TENANT_ID" ] || { log_err "$TENANT_FILE has no TENANT_ID"; exit 2; }
@@ -38,6 +43,15 @@ SCOPE="$(cfg_get "$TENANT_FILE" EXPORT_SCOPE)"; SCOPE="${SCOPE:-subscription}"
 BILLING_SCOPE_ID="$(cfg_get "$TENANT_FILE" BILLING_SCOPE_ID)"
 SUBSCRIPTIONS="$(cfg_get "$TENANT_FILE" SUBSCRIPTIONS)"
 MG="$(cfg_get "$TENANT_FILE" MANAGEMENT_GROUP)"
+
+# EXPORT_API_VERSION follows the same capture-first precedence as
+# AZURE_CLOUD above: Azure moves this version out from under
+# create-focus-exports.sh's default, and 2023-08-01 and earlier cannot
+# create FOCUS exports at all, so a tenant may need to pin a specific
+# version independent of (and overriding) the shared .env default.
+inherited_export_api_version="${EXPORT_API_VERSION:-}"
+tf_export_api_version="$(cfg_get "$TENANT_FILE" EXPORT_API_VERSION)"
+EXPORT_API_VERSION="${tf_export_api_version:-$inherited_export_api_version}"
 
 # require_value VALUE LABEL SOURCE — fail loudly, naming which value came up
 # empty and which step produced it. Without this, an empty app id, domain,
@@ -66,30 +80,40 @@ require_value "$BLOB_ENDPOINT" "the blob endpoint" "ensure-storage.sh"
 STORAGE_ID="$(az storage account show --name "$STORAGE" --resource-group "$RG" --query id -o tsv)"
 
 # 3) exports — before the billing source, so Kion is never pointed at an
-#    empty container with nothing feeding it
-"$HERE/create-focus-exports.sh" \
-  --storage-account-id "$STORAGE_ID" --container "$CONTAINER" --prefix "$PREFIX" \
-  --scope "$SCOPE" ${BILLING_SCOPE_ID:+--billing-scope-id "$BILLING_SCOPE_ID"} \
-  ${SUBSCRIPTIONS:+--subscriptions "$SUBSCRIPTIONS"} \
-  ${FOCUS_VERSION:+--focus-version "$FOCUS_VERSION"} \
-  ${EXPORT_RECURRENCE:+--recurrence "$EXPORT_RECURRENCE"} \
-  ${EXPORT_TIMEFRAME:+--timeframe "$EXPORT_TIMEFRAME"} >/dev/null
+#    empty container with nothing feeding it. --only kion-source skips this
+#    to re-run just the app + billing-source registration.
+if [ "$ONLY" != "kion-source" ]; then
+  "$HERE/create-focus-exports.sh" \
+    --storage-account-id "$STORAGE_ID" --container "$CONTAINER" --prefix "$PREFIX" \
+    --scope "$SCOPE" ${BILLING_SCOPE_ID:+--billing-scope-id "$BILLING_SCOPE_ID"} \
+    ${SUBSCRIPTIONS:+--subscriptions "$SUBSCRIPTIONS"} \
+    ${FOCUS_VERSION:+--focus-version "$FOCUS_VERSION"} \
+    ${EXPORT_RECURRENCE:+--recurrence "$EXPORT_RECURRENCE"} \
+    ${EXPORT_TIMEFRAME:+--timeframe "$EXPORT_TIMEFRAME"} \
+    ${EXPORT_API_VERSION:+--api-version "$EXPORT_API_VERSION"} >/dev/null
+fi
 
-# 4) the app Kion authenticates as
-app_out="$("$HERE/create-kion-app.sh" --resource-group "$RG" --storage-account "$STORAGE" \
-  --container "$CONTAINER" ${MG:+--management-group "$MG"} ${KION_HOST:+--kion-url "$KION_HOST"})"
-APP_ID="$(printf '%s\n' "$app_out" | sed -n 's/^APP_ID=//p')"
-TENANT_DOMAIN="$(printf '%s\n' "$app_out" | sed -n 's/^TENANT_DOMAIN=//p')"
-CREDENTIAL_FILE="$(printf '%s\n' "$app_out" | sed -n 's/^CREDENTIAL_FILE=//p')"
-require_value "$APP_ID" "APP_ID" "create-kion-app.sh"
-require_value "$TENANT_DOMAIN" "TENANT_DOMAIN" "create-kion-app.sh"
-require_value "$CREDENTIAL_FILE" "CREDENTIAL_FILE" "create-kion-app.sh"
-CLIENT_SECRET="$(cfg_get "$CREDENTIAL_FILE" AZURE_CLIENT_SECRET)"
-require_value "$CLIENT_SECRET" "AZURE_CLIENT_SECRET" "$CREDENTIAL_FILE"
+# 4) & 5) the app Kion authenticates as, and the Kion billing source itself.
+# --only exports skips both to re-run just the FOCUS export creation.
+if [ "$ONLY" != "exports" ]; then
+  app_out="$("$HERE/create-kion-app.sh" --resource-group "$RG" --storage-account "$STORAGE" \
+    --container "$CONTAINER" ${MG:+--management-group "$MG"} ${KION_HOST:+--kion-url "$KION_HOST"})"
+  APP_ID="$(printf '%s\n' "$app_out" | sed -n 's/^APP_ID=//p')"
+  TENANT_DOMAIN="$(printf '%s\n' "$app_out" | sed -n 's/^TENANT_DOMAIN=//p')"
+  CREDENTIAL_FILE="$(printf '%s\n' "$app_out" | sed -n 's/^CREDENTIAL_FILE=//p')"
+  require_value "$APP_ID" "APP_ID" "create-kion-app.sh"
+  require_value "$TENANT_DOMAIN" "TENANT_DOMAIN" "create-kion-app.sh"
+  require_value "$CREDENTIAL_FILE" "CREDENTIAL_FILE" "create-kion-app.sh"
+  CLIENT_SECRET="$(cfg_get "$CREDENTIAL_FILE" AZURE_CLIENT_SECRET)"
+  require_value "$CLIENT_SECRET" "AZURE_CLIENT_SECRET" "$CREDENTIAL_FILE"
 
-# 5) the Kion billing source
-"$HERE/kion-create-billing-source.sh" --tenant-file "$TENANT_FILE" \
-  --domain "$TENANT_DOMAIN" --app-id "$APP_ID" --client-secret "$CLIENT_SECRET" \
-  --endpoint "$BLOB_ENDPOINT" --container "$CONTAINER" --prefix "$PREFIX"
+  "$HERE/kion-create-billing-source.sh" --tenant-file "$TENANT_FILE" \
+    --domain "$TENANT_DOMAIN" --app-id "$APP_ID" --client-secret "$CLIENT_SECRET" \
+    --endpoint "$BLOB_ENDPOINT" --container "$CONTAINER" --prefix "$PREFIX"
+fi
 
-log_info "tenant $TENANT_ID onboarded"
+case "$ONLY" in
+  exports)     log_info "tenant $TENANT_ID: FOCUS exports re-created" ;;
+  kion-source) log_info "tenant $TENANT_ID: Kion billing source re-registered" ;;
+  *)           log_info "tenant $TENANT_ID onboarded" ;;
+esac

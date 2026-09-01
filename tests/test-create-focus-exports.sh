@@ -53,4 +53,20 @@ if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
 assert_file_contains "$TEST_TMP/err" "billing-scope-id"
 teardown_test
 
+# 2023-08-01 and earlier only accept ActualCost/AmortizedCost/Usage in
+# definition.type; FocusCost (which this script always sends) needs a later
+# "enhanced exports" api-version, so the default must not be 2023-08-01.
+setup_test "defaults to api-version 2025-03-01, the first version that accepts FocusCost"
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+  --subscriptions "sub-a" >/dev/null
+assert_az_called "api-version=2025-03-01"
+teardown_test
+
+setup_test "--api-version overrides the default"
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+  --subscriptions "sub-a" --api-version 2023-08-01 >/dev/null
+assert_az_called "api-version=2023-08-01"
+grep -q "api-version=2025-03-01" "$TEST_TMP/az.log" && fail "override did not reach the url; default leaked through"
+teardown_test
+
 finish_tests

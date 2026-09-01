@@ -15,7 +15,7 @@ set -euo pipefail
 STORAGE_ID=""; CONTAINER=""; PREFIX="focus"
 SCOPE="subscription"; BILLING_SCOPE_ID=""; SUBSCRIPTIONS=""
 FOCUS_VERSION="1.0"; RECURRENCE="Daily"; TIMEFRAME="MonthToDate"
-API_VERSION="2023-08-01"
+API_VERSION="2025-03-01"
 
 while [ $# -gt 0 ]; do
   case "$1" in

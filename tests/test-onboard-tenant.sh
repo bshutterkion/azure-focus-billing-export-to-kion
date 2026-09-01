@@ -103,4 +103,74 @@ fi
 assert_file_contains "$TEST_TMP/err" "APP_ID"
 teardown_test
 
+setup_test "EXPORT_API_VERSION: tenant file overrides the inherited .env default"
+cat > "$TEST_TMP/t.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureUSGovernment
+BILLING_MODEL=MCA
+RESOURCE_GROUP=rg
+STORAGE_ACCOUNT=sa
+CONTAINER=focus
+LOCATION=usgovvirginia
+EXPORT_API_VERSION=2025-03-01
+KION_PAYER_ID=
+EOF
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "sub-a"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP"
+EXPORT_API_VERSION=2023-08-01 KION_HOST=https://k KION_API_KEY=k \
+  bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null
+assert_az_called "api-version=2025-03-01"
+grep -q "api-version=2023-08-01" "$TEST_TMP/az.log" && fail "tenant file value did not win over the inherited .env default"
+teardown_test
+
+setup_test "EXPORT_API_VERSION: inherited .env default flows through when the tenant file omits it"
+write_tenant
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "sub-a"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP"
+EXPORT_API_VERSION=9999-01-01 KION_HOST=https://k KION_API_KEY=k \
+  bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null
+assert_az_called "api-version=9999-01-01"
+teardown_test
+
+setup_test "--only exports runs the export step but skips the app and billing source"
+write_tenant
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "sub-a"
+cd "$TEST_TMP"
+KION_HOST=https://k KION_API_KEY=k \
+  bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login --only exports >/dev/null
+assert_az_called "rest --method put"
+assert_az_not_called "ad app"
+[ -s "$TEST_TMP/curl.log" ] && fail "must not register a billing source with --only exports"
+teardown_test
+
+setup_test "--only kion-source runs the app and billing source but skips creating exports"
+write_tenant
+az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "sub-a"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP"
+KION_HOST=https://k KION_API_KEY=k \
+  bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login --only kion-source >/dev/null
+assert_az_not_called "rest --method put"
+assert_curl_called "/v1/payer/standalone"
+teardown_test
+
+setup_test "rejects an unknown --only value"
+write_tenant
+if bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login --only bogus \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+# Must be rejected by --only's own value validation, not just because --only
+# itself is an unrecognized flag (that failure mode also mentions "only" and
+# would pass before the flag exists at all).
+assert_file_contains "$TEST_TMP/err" "exports.*kion-source"
+teardown_test
+
 finish_tests
