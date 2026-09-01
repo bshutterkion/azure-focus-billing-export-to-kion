@@ -91,7 +91,7 @@ EOF
 
 setup_test "real onboard-tenant.sh through the loop: a fresh tenant is ok and records its payer id"
 real_seam_tenants
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -109,7 +109,7 @@ teardown_test
 
 setup_test "real onboard-tenant.sh through the loop: an already-onboarded tenant is warn, not ok"
 real_seam_tenants
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1

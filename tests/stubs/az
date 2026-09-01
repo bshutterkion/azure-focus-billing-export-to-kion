@@ -9,6 +9,11 @@ fi
 case "$*" in
   "account show --query tenantId"*)  echo "$(state TENANT_ID)" ;;
   "account show --query id"*)        echo "$(state SUBSCRIPTION_ID)" ;;
+  # The CLI's active cloud, which onboard-tenant.sh compares against the
+  # configured AZURE_CLOUD. Deliberately answered from state with no default:
+  # a test that forgets to declare which cloud the CLI is on must not be
+  # silently handed the one that happens to make its fixture pass.
+  "account show --query environmentName"*) echo "$(state ENVIRONMENT_NAME)" ;;
   # `account list` honours a --query filter of the form [?tenantId=='<id>'],
   # answering from state key SUBSCRIPTIONS_<id> when the test defines one. That
   # is what lets a test model a CLI profile holding two tenants' subscriptions

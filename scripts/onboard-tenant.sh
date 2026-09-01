@@ -107,6 +107,31 @@ fi
 current="$(az account show --query tenantId -o tsv 2>/dev/null || echo "")"
 [ "$current" = "$TENANT_ID" ] || { log_err "active tenant '$current' is not the configured tenant '$TENANT_ID'"; exit 1; }
 
+# The cloud needs the same check, for the same reason, because "which cloud"
+# has two independent sources of truth here and nothing keeps them in step:
+# resolve_cloud reads ARM/Graph/blob/AD endpoints from the CLI's *active*
+# cloud, while AZURE_CLOUD above picks the Kion account type id (MCA 16 vs MCA
+# Gov 18, CSP 3 vs CSP Gov 11). Signed in to AzureUSGovernment with a tenant
+# file saying AzureCloud, the run would use Gov endpoints and create Gov
+# storage, then register the source in Kion as AzureMCA instead of AzureMCAGov
+# -- right data, wrong account type, and not one error anywhere. This tool
+# never runs `az cloud set`, and onboard-all.sh loops Gov and Commercial
+# tenants from one checkout, so only a check catches it.
+#
+# The check is deliberately outside the --skip-login branch above, exactly like
+# the tenant check: --skip-login skips `az login`, it does not make an
+# operator-supplied session safe to assume things about. It makes it less so.
+#
+# Switching the cloud here would mutate global CLI state the operator may be
+# relying on elsewhere, and would need a fresh login anyway, so say what is
+# wrong and stop.
+active_cloud="$(az account show --query environmentName -o tsv 2>/dev/null || echo "")"
+if [ "$active_cloud" != "$AZURE_CLOUD" ]; then
+  log_err "active Azure cloud '$active_cloud' is not the configured cloud '$AZURE_CLOUD'"
+  log_err "run 'az cloud set --name $AZURE_CLOUD' and sign in to tenant $TENANT_ID again"
+  exit 1
+fi
+
 # 2) storage
 BLOB_ENDPOINT="$("$HERE/ensure-storage.sh" --resource-group "$RG" --storage-account "$STORAGE" \
   --container "$CONTAINER" ${LOCATION:+--location "$LOCATION"})"

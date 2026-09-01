@@ -33,7 +33,7 @@ EOF
 
 setup_test "runs storage, exports, app and billing source in order"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -51,7 +51,7 @@ teardown_test
 
 setup_test "reports each completed step on stdout for the run summary"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -68,7 +68,7 @@ write_tenant
 # Pre-set payer id: kion-create-billing-source.sh will refuse to touch Kion and
 # deliberately leaves the prefix alone, so this run does NOT finish the job.
 printf 'KION_PAYER_ID=42\n' >> "$TEST_TMP/t.env"
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -86,7 +86,7 @@ teardown_test
 
 setup_test "stops before the billing source when exports fail"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"
 export AZ_FAIL_MATCH="rest --method put"
@@ -108,6 +108,59 @@ fi
 assert_file_contains "$TEST_TMP/err" "tenant"
 teardown_test
 
+# "Which cloud" has two independent sources of truth: the CLI's active cloud
+# (which resolve_cloud reads endpoints from) and AZURE_CLOUD (which picks the
+# Kion account type id). Nothing in this tool runs `az cloud set`, so they can
+# disagree, and a disagreement produces the right data under the wrong Kion
+# account type with no error anywhere.
+setup_test "refuses to run when the CLI's active cloud is not the configured cloud"
+write_tenant  # AZURE_CLOUD=AzureUSGovernment
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureCloud; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+# --skip-login deliberately: skipping the login is precisely when the operator's
+# own `az cloud set` is what is in force, so the check has to hold here too.
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+# The error has to name the active cloud and the configured one -- neither
+# alone tells an operator which end to change -- and give the remedy.
+assert_file_contains "$TEST_TMP/err" "AzureCloud.*AzureUSGovernment"
+assert_file_contains "$TEST_TMP/err" "az cloud set --name AzureUSGovernment"
+# ...and it must stop before anything is created, not be discovered afterwards.
+assert_az_not_called "storage container create"
+assert_az_not_called "rest --method put"
+assert_az_not_called "ad app"
+[ -s "$TEST_TMP/curl.log" ] && fail "must not register a billing source from the wrong cloud"
+teardown_test
+
+setup_test "a Commercial tenant on a Commercial CLI passes the cloud check and gets the commercial account type"
+cat > "$TEST_TMP/t.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureCloud
+BILLING_MODEL=MCA
+RESOURCE_GROUP=rg
+STORAGE_ACCOUNT=sa
+CONTAINER=focus
+LOCATION=eastus
+EXPORT_SCOPE=subscription
+KION_PAYER_ID=
+EOF
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureCloud; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.windows.net/"
+az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null
+rc=$?
+assert_rc_zero "$rc" "commercial-on-commercial run"
+# The guard compares two values, so it must pass a matching Commercial pair as
+# readily as a matching Gov one; nothing here may hardcode a cloud. Asserting
+# the account type as well ties the check to the thing it exists to protect.
+assert_curl_stdin_contains '"account_type_id":16'
+teardown_test
+
 setup_test "tenant file with no AZURE_CLOUD falls back to the inherited environment, not Commercial"
 cat > "$TEST_TMP/t.env" <<EOF
 TENANT_ID=t-1
@@ -119,7 +172,7 @@ LOCATION=usgovvirginia
 EXPORT_SCOPE=subscription
 KION_PAYER_ID=
 EOF
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -136,7 +189,7 @@ teardown_test
 
 setup_test "aborts before any curl call when create-kion-app.sh yields no APP_ID"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"
 # Exercise onboard-tenant.sh's own validation, not create-kion-app.sh's
@@ -174,7 +227,7 @@ EXPORT_SCOPE=subscription
 EXPORT_API_VERSION=2025-03-01
 KION_PAYER_ID=
 EOF
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -188,7 +241,7 @@ teardown_test
 
 setup_test "EXPORT_API_VERSION: inherited .env default flows through when the tenant file omits it"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -217,7 +270,7 @@ EXPORT_RECURRENCE=Weekly
 EXPORT_TIMEFRAME=WeekToDate
 KION_PAYER_ID=
 EOF
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -235,7 +288,7 @@ teardown_test
 
 setup_test "FOCUS_VERSION, EXPORT_RECURRENCE and EXPORT_TIMEFRAME still inherit from .env when the tenant file omits them"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -251,7 +304,7 @@ teardown_test
 
 setup_test "--only exports runs the export step but skips the app and billing source"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"
 cd "$TEST_TMP" || exit 1
@@ -266,7 +319,7 @@ teardown_test
 
 setup_test "--only kion-source runs the app and billing source but skips creating exports"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -296,7 +349,7 @@ teardown_test
 
 setup_test "passes the exact KION_PREFIX from create-focus-exports.sh to kion-create-billing-source.sh (subscription scope)"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -331,7 +384,7 @@ EXPORT_SCOPE=billingAccount
 BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
 KION_PAYER_ID=
 EOF
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -356,7 +409,7 @@ LOCATION=usgovvirginia
 BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
 KION_PAYER_ID=
 EOF
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state APP_ID "app-1"; az_state SP_OID "sp-1"
 cd "$TEST_TMP" || exit 1
@@ -369,7 +422,7 @@ teardown_test
 
 setup_test "EXPORT_SCOPE=subscription with more than one subscription aborts before touching Kion"
 write_tenant
-az_state TENANT_ID t-1; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A,$SUB_B"
 cd "$TEST_TMP" || exit 1

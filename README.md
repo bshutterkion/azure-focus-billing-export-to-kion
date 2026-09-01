@@ -22,8 +22,18 @@ The run signs in interactively to that tenant as it reaches that step (skipped
 if the CLI is already pointed at it), so there is no separate `az login` step
 to run first — doing that yourself risks leaving the CLI logged into the wrong
 tenant when the run gets there. Pass `--skip-login` directly to
-`scripts/onboard-tenant.sh` if a session is already pointed at the right
-tenant and you want to bypass the check.
+`scripts/onboard-tenant.sh` to skip the sign-in when a session is already
+pointed at the right tenant.
+
+The run then checks that the CLI's active tenant *and* active cloud both match
+the tenant file, and stops before creating anything if either does not. Both
+checks run under `--skip-login` too: that flag skips the sign-in, not the
+verification. The cloud check earns its place because nothing here runs
+`az cloud set` — the CLI's cloud decides which ARM, Graph and storage endpoints
+the run uses, while `AZURE_CLOUD` in the tenant file decides the Kion account
+type (MCA vs MCA Gov, CSP vs CSP Gov). Left to disagree, a run puts the right
+data under the wrong account type and reports success. Fix it with
+`az cloud set --name <cloud>`, then sign in again.
 
 Or every tenant in `tenants/`, continuing past failures and printing a summary:
 
