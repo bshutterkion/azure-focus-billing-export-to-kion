@@ -345,8 +345,9 @@ FOCUS prefix:     $EXPORT_PREFIX
 EOF
   else
     cat <<EOF >&2
-FOCUS prefix:     (not available here -- run without --prefix. Take it verbatim
-                  from the KION_PREFIX= line the export step prints.)
+FOCUS prefix:     (this run was given no --prefix, so there is none to show.
+                  Take it verbatim from the KION_PREFIX= line the export step
+                  prints.)
 EOF
   fi
 fi
