@@ -3,3 +3,5 @@ tenants/*.env
 !tenants/*.env.example
 *credential*.env
 .DS_Store
+docs/superpowers
+docs/VERIFICATION.md
