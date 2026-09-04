@@ -3,8 +3,7 @@
 # create-focus-exports.sh — create Azure Cost Management FOCUS exports.
 #
 # FocusCost only: the FOCUS dataset already carries both actual (BilledCost)
-# and amortized (EffectiveCost) costs, and Kion's FOCUS ingestion cannot read
-# the ActualCost/AmortizedCost dataset types.
+# and amortized (EffectiveCost) costs.
 #
 # `az costmanagement export create` cannot create FOCUS exports (it accepts
 # only ActualCost, AmortizedCost and Usage), so this uses `az rest`, which
