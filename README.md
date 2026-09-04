@@ -4,10 +4,8 @@ Onboards Azure tenants to Kion using native Cost Management **FOCUS exports**.
 For each tenant it creates the storage, the FOCUS exports, the app registration
 Kion authenticates as, and the Kion billing source that reads the data.
 
-Unrelated to the Partner Center converter: nothing here reads Partner Center or
-runs a converter. Azure writes the exports into the tenant's own storage and
-Kion reads them from there, so there is no cross-tenant write and no shared
-writer identity.
+Azure writes the exports into the tenant's own storage and Kion reads them from
+there, so there is no cross-tenant write and no shared writer identity.
 
 ## Setup
 
@@ -84,8 +82,7 @@ Azure does not offer billing-account or billing-profile FOCUS exports under a
 Microsoft Partner Agreement. A CSP customer tenant's only tenant-wide scope is
 Customer scope, which lives in the *partner's* tenant and needs Admin agent or
 billing admin there — not reachable from a sign-in to the customer tenant. So a
-CSP customer with more than one subscription cannot be onboarded with this tool;
-that case is what the Partner Center converter pipeline exists for.
+CSP customer with more than one subscription cannot be onboarded with this tool.
 
 Every step is idempotent, so re-running after a failure resumes rather than
 duplicating.
