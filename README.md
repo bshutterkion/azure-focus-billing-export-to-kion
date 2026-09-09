@@ -12,6 +12,46 @@ there, so there is no cross-tenant write and no shared writer identity.
     cp .env.example .env                       # Kion host, API key, defaults
     cp tenants/example.env.example tenants/<name>.env
 
+## Pre-flight (do this before a multi-tenant rollout)
+
+    make preflight TENANTS=tenant-ids.csv   # name,tenant-id per line
+    make preflight                          # or survey existing tenants/*.env
+
+Read-only: it creates nothing and never calls Kion. It signs in to each tenant
+and reports what a run would need and whether it would get it — one
+tab-separated row per tenant on stdout, progress on stderr:
+
+    make preflight TENANTS=tenants.csv > preflight.tsv
+    column -t -s"$(printf '\t')" preflight.tsv
+
+    NAME     TENANT_ID  CLOUD       SUBS  MG_ROLE  BILLING_ACCOUNT  BILLING_PROFILE  EXPORT_SCOPE    VERDICT  NOTE
+    acme     t-1        AzureCloud  4     Owner    acct-1           prof-1           billingProfile  ready    -
+    contoso  t-2        AzureCloud  2     Reader   acct-1           prof-2           billingProfile  blocked  no Owner or User Access Administrator at the tenant root management group
+    fabrikam t-3        AzureCloud  9     Owner    acct-1           prof-3,prof-4    unknown         check    subscriptions span 2 billing profiles; no single per-tenant export scope exists
+
+It exists because the two things that most often stop a first run — no Owner or
+User Access Administrator at the management group, and a billing scope the
+signed-in identity cannot see — are only discoverable inside the tenant.
+Finding them one at a time, deep into a rollout, is expensive. The survey also
+emits the two values a tenant file cannot be written without, `BILLING_SCOPE_ID`
+and the `EXPORT_SCOPE` that matches it, so it doubles as the input to
+generating `tenants/*.env`.
+
+`EXPORT_SCOPE` prefers `billingProfile` whenever a single profile covers the
+tenant, and falls back to `billingAccount` only when the profiles cannot be
+read. The asymmetry is deliberate: signed in to one tenant it is impossible to
+see whether some *other* tenant bills to the same account, so `billingAccount`
+can never be confirmed safe from there, while a profile covering exactly this
+tenant's subscriptions is never broader than the tenant. A `check` verdict on
+the scope means no single per-tenant scope exists and a human has to decide —
+`billingAccount` would carry other tenants' costs, any one profile would drop
+subscriptions.
+
+`VERDICT` is `ready`, `check` (a run would probably work but produce something
+worth looking at first) or `blocked` (a run would fail). The script exits 0
+regardless: reporting a blocker is it doing its job. Gate on the column, not
+the exit code.
+
 ## Onboarding
 
     make onboard TENANT=<name>
@@ -110,6 +150,14 @@ by reading `tenants/*.env` directly. It makes no Azure or Kion API calls.
   to the management group. Either point `MANAGEMENT_GROUP` at a group you own,
   or have a Global Admin enable "Access management for Azure resources" and
   sign in again.
+- A **billing role on the billing scope** (billing account or billing profile
+  Contributor, or equivalent) when `EXPORT_SCOPE` is `billingAccount` or
+  `billingProfile` — which it is for every MCA and EA tenant. This is separate
+  from anything in the tenant's own RBAC, and when the billing account lives in
+  a different tenant than the one being onboarded, tenant-level Owner does not
+  confer it. `make preflight` reports it as an unreadable billing account.
+
+`make preflight` checks the last two across every tenant before you start.
 
 ## Environment variables
 

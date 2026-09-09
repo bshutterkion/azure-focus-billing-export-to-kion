@@ -1,4 +1,4 @@
-.PHONY: help onboard onboard-all exports kion-source status test
+.PHONY: help preflight onboard onboard-all exports kion-source status test
 
 TENANTS_DIR ?= tenants
 TENANT ?=
@@ -15,6 +15,13 @@ endef
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | sort
+
+preflight: ## Survey tenants before onboarding. Read-only. TENANTS=<file> or defaults to tenants/
+	@if [ -n "$(strip $(TENANTS))" ]; then \
+	  scripts/preflight-tenants.sh --tenants-file "$(TENANTS)"; \
+	else \
+	  scripts/preflight-tenants.sh --dir "$(TENANTS_DIR)"; \
+	fi
 
 onboard: ## Onboard one tenant end to end: make onboard TENANT=<name>
 	$(require_tenant)

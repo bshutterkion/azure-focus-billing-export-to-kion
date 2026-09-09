@@ -14,6 +14,28 @@ case "$*" in
   # a test that forgets to declare which cloud the CLI is on must not be
   # silently handed the one that happens to make its fixture pass.
   "account show --query environmentName"*) echo "$(state ENVIRONMENT_NAME)" ;;
+  # The session's own identity, used by preflight-tenants.sh to ask what role
+  # it holds. Two keys, not one: "no signed-in user" (a service principal) and
+  # "cannot identify the session at all" are different answers there.
+  "account show --query user.name"*) echo "$(state USER_NAME)" ;;
+  "ad signed-in-user show"*)         echo "$(state SIGNED_IN_OID)" ;;
+  # Role names come back one per line from the real CLI; declare them
+  # comma-separated in state and split here, as with SUBSCRIPTIONS.
+  "role assignment list"*)           echo "$(state MG_ROLES)" | tr ',' '\n' ;;
+  "billing account list"*)           echo "$(state BILLING_ACCOUNTS)" | tr ',' '\n' ;;
+  # Per-account subscription -> billing profile map, as TSV rows. State key
+  # BILLING_SUBS_<account> holds "sub|profile" pairs separated by commas, so a
+  # test can model one account whose subscriptions span two profiles.
+  "billing subscription list"*)
+    _q_acct="$(printf '%s' "$*" | sed -n 's/.*--account-name \([^ ]*\).*/\1/p')"
+    if [ -n "$_q_acct" ]; then
+      state "BILLING_SUBS_${_q_acct}" | tr ',' '\n' \
+        | while IFS= read -r _pair; do
+            [ -n "$_pair" ] || continue
+            printf '%s\t%s\n' "${_pair%%|*}" "${_pair#*|}"
+          done
+    fi
+    ;;
   # `account list` honours a --query filter of the form [?tenantId=='<id>'],
   # answering from state key SUBSCRIPTIONS_<id> when the test defines one. That
   # is what lets a test model a CLI profile holding two tenants' subscriptions
