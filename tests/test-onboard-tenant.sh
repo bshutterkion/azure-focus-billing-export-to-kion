@@ -420,6 +420,94 @@ assert_az_called "billingAccounts/ba/providers/Microsoft.CostManagement/exports"
 assert_az_not_called "account list"
 teardown_test
 
+# RESOURCE_SUBSCRIPTION_ID answers "where do the resources go", which is a
+# different question from EXPORT_SCOPE/SUBSCRIPTIONS ("whose costs get
+# exported"). Unset, every `az group`/`az storage` call lands wherever
+# `az login` left the active subscription.
+setup_test "RESOURCE_SUBSCRIPTION_ID pins the subscription the storage steps use"
+write_tenant
+printf 'RESOURCE_SUBSCRIPTION_ID=%s\n' "$SUB_A" >> "$TEST_TMP/t.env"
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null
+rc=$?
+assert_rc_zero "$rc" "pinned RESOURCE_SUBSCRIPTION_ID run"
+assert_az_called "storage container create .*--subscription $SUB_A"
+# The controller's own storage-account-id lookup needs it as well: that id
+# becomes the export's deliveryInfo destination and the Storage Blob Data
+# Reader role scope, so resolving it in the wrong subscription sends the whole
+# chain somewhere nobody asked for.
+assert_az_called "storage account show .*--query id .*--subscription $SUB_A"
+teardown_test
+
+# `az account list` returns every subscription in the CLI profile, across every
+# tenant signed into it -- and onboard-all.sh signs into each tenant in turn, so
+# by the second tenant the profile holds the first tenant's subscriptions too.
+# A stale or copy-pasted id would therefore create this customer's storage
+# inside another customer's tenant, with no error anywhere.
+setup_test "refuses a RESOURCE_SUBSCRIPTION_ID that belongs to a different tenant"
+write_tenant
+printf 'RESOURCE_SUBSCRIPTION_ID=%s\n' "$SUB_B" >> "$TEST_TMP/t.env"
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+# The profile holds both; only SUB_A is this tenant's.
+az_state SUBSCRIPTIONS "$SUB_A,$SUB_B"
+az_state SUBSCRIPTIONS_t-1 "$SUB_A"
+cd "$TEST_TMP" || exit 1
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+# Name the rejected id and the tenant; neither alone tells an operator which
+# end of the mismatch to fix.
+assert_file_contains "$TEST_TMP/err" "$SUB_B"
+assert_file_contains "$TEST_TMP/err" "t-1"
+assert_az_not_called "group create"
+assert_az_not_called "storage account create"
+assert_az_not_called "rest --method put"
+[ -s "$TEST_TMP/curl.log" ] && fail "must not register a billing source for a foreign subscription"
+teardown_test
+
+setup_test "refuses a malformed RESOURCE_SUBSCRIPTION_ID before creating anything"
+write_tenant
+printf 'RESOURCE_SUBSCRIPTION_ID=not-a-guid\n' >> "$TEST_TMP/t.env"
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "$SUB_A"
+cd "$TEST_TMP" || exit 1
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "not-a-guid"
+assert_az_not_called "group create"
+assert_az_not_called "storage account create"
+teardown_test
+
+setup_test "omitting RESOURCE_SUBSCRIPTION_ID keeps the CLI's active subscription, and names it"
+write_tenant
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTION_ID "sub-active"
+az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+  >/dev/null 2>"$TEST_TMP/err"
+rc=$?
+assert_rc_zero "$rc" "unpinned run"
+assert_az_not_called "--subscription"
+# "it arbitrarily chooses a subscription" is only arbitrary while it is
+# invisible. An unpinned run must still say which subscription it landed on,
+# and how to pin it.
+# One line naming both, not two coincidental mentions: create-kion-app.sh's
+# banner already prints the active subscription several steps later, which is
+# after the storage was created and too late to be a warning about where it
+# went.
+assert_file_contains "$TEST_TMP/err" "RESOURCE_SUBSCRIPTION_ID.*sub-active"
+teardown_test
+
 setup_test "EXPORT_SCOPE=subscription with more than one subscription aborts before touching Kion"
 write_tenant
 az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1

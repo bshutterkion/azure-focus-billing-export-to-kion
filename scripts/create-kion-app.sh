@@ -55,6 +55,11 @@
 #   --resource-group <rg>    Resource group holding the FOCUS storage account
 #   --storage-account <sa>   FOCUS storage account
 #   --container <name>       FOCUS container to grant Storage Blob Data Reader on
+#   --subscription <id>      Subscription the FOCUS storage account lives in. Only
+#                            the storage lookups take it: the app registration,
+#                            Graph permissions and management-group grant are all
+#                            tenant-scoped, not subscription-scoped. Omitted, the
+#                            CLI's active subscription is used.
 #   --prefix <path>          The FOCUS prefix to print in the billing-source summary,
 #                            verbatim as Kion must receive it. There is deliberately
 #                            no default: only create-focus-exports.sh knows the
@@ -82,6 +87,7 @@ MANAGEMENT_GROUP=""
 RG=""
 STORAGE=""
 CONTAINER=""
+SUBSCRIPTION=""
 EXPORT_PREFIX=""
 ENABLE_SUB_CREATION=0
 ROTATION_PERMS=0
@@ -100,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     --resource-group)     RG="$2"; shift 2 ;;
     --storage-account)    STORAGE="$2"; shift 2 ;;
     --container)          CONTAINER="$2"; shift 2 ;;
+    --subscription)       SUBSCRIPTION="$2"; shift 2 ;;
     --prefix)             EXPORT_PREFIX="$2"; shift 2 ;;
     --enable-subscription-creation) ENABLE_SUB_CREATION=1; shift ;;
     --rotation-perms)     ROTATION_PERMS=1; shift ;;
@@ -116,7 +123,11 @@ command -v jq >/dev/null 2>&1 || { log_err "jq not found in PATH"; exit 1; }
 resolve_cloud
 
 TENANT_ID=$(az account show --query tenantId -o tsv)
-SUB_ID=$(az account show --query id -o tsv)
+# The subscription the storage lookups below will actually use: the pinned one
+# when --subscription was given, otherwise whatever the CLI has active. Taking
+# it from `az account show` unconditionally would make the line logged below
+# name a subscription those lookups never touched.
+SUB_ID="${SUBSCRIPTION:-$(az account show --query id -o tsv)}"
 # The tenant root management group always carries the tenant id as its name.
 [[ -z "$MANAGEMENT_GROUP" ]] && MANAGEMENT_GROUP="$TENANT_ID"
 
@@ -272,12 +283,20 @@ fi
 # ---------- 8) read access to the FOCUS container ----------
 if [[ -n "$STORAGE" && -n "$CONTAINER" ]]; then
   log_info "Granting Storage Blob Data Reader on $CONTAINER ..."
-  STORAGE_ID=$(az storage account show --name "$STORAGE" --resource-group "$RG" --query id -o tsv)
+  # Both lookups take --subscription, because the storage account need not be
+  # in the CLI's active subscription. The id resolved here becomes the role
+  # assignment's scope and the endpoint becomes what Kion reads from, so
+  # resolving either against the wrong subscription either fails outright or --
+  # where an account of the same name exists there -- points Kion at somebody
+  # else's container.
+  STORAGE_ID=$(az storage account show --name "$STORAGE" --resource-group "$RG" \
+    --query id -o tsv ${SUBSCRIPTION:+--subscription "$SUBSCRIPTION"})
   az role assignment create --assignee-object-id "$SP_OID" \
     --assignee-principal-type ServicePrincipal --role "Storage Blob Data Reader" \
     --scope "${STORAGE_ID}/blobServices/default/containers/${CONTAINER}" \
     --only-show-errors >/dev/null 2>&1 || echo "    (already assigned)" >&2
-  BLOB_ENDPOINT=$(az storage account show --name "$STORAGE" --resource-group "$RG" --query "primaryEndpoints.blob" -o tsv)
+  BLOB_ENDPOINT=$(az storage account show --name "$STORAGE" --resource-group "$RG" \
+    --query "primaryEndpoints.blob" -o tsv ${SUBSCRIPTION:+--subscription "$SUBSCRIPTION"})
 else
   BLOB_ENDPOINT=""
 fi

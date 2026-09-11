@@ -88,6 +88,32 @@ are never executed. `.env` is *also* parsed by make (`-include .env`), so `#`
 and `$` in its values get mangled; the warning at the top of `.env.example`
 covers it.
 
+### "Which subscription" is two different questions
+
+`RESOURCE_SUBSCRIPTION_ID` says where the resource group, storage account and
+container are **created**. `SUBSCRIPTIONS` (with `EXPORT_SCOPE=subscription`)
+says whose **costs** are exported. They are unrelated, and a tenant commonly
+wants one specific subscription for placement while exporting at
+`billingAccount` scope across all of them. Do not merge them.
+
+`RESOURCE_SUBSCRIPTION_ID` is tenant-file-only — no capture-first fallback,
+unlike `AZURE_CLOUD` and the export settings. A subscription id identifies one
+tenant's subscription and nothing else, so an inherited `.env` default could
+only be right for one tenant and silently wrong for every other.
+
+Empty means "use the CLI's active subscription", which is what every tenant file
+predating the setting relies on. The controller logs a warning naming the active
+subscription in that case: an arbitrary choice that nothing reports is
+indistinguishable from a deliberate one.
+
+Set, it is validated against `az account list` filtered to the tenant being
+onboarded, for the same reason `create-focus-exports.sh` filters there: the CLI
+profile accumulates every tenant's subscriptions across an `onboard-all` loop,
+so a mis-pasted id is usually a real subscription belonging to a different
+customer. Every `az group`/`az storage` call must carry `--subscription` —
+flagging only some of them reads the resource group from one subscription and
+creates the storage account in another.
+
 ### Two independent sources of truth for "which cloud"
 
 `resolve_cloud` derives ARM/Graph/blob/AD endpoints from the CLI's **active**

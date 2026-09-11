@@ -170,8 +170,31 @@ file sets them non-empty. The values that work that way are exactly:
 
 `KION_HOST`, `KION_API_KEY` and `KION_API_BASE` are `.env`-only: one Kion serves
 every tenant. `RESOURCE_GROUP`, `STORAGE_ACCOUNT`, `CONTAINER`, `LOCATION`,
-`BILLING_SCOPE_ID`, `SUBSCRIPTIONS`, `MANAGEMENT_GROUP` and `KION_PAYER_ID` are
-per-tenant only.
+`RESOURCE_SUBSCRIPTION_ID`, `BILLING_SCOPE_ID`, `SUBSCRIPTIONS`,
+`MANAGEMENT_GROUP` and `KION_PAYER_ID` are per-tenant only.
+
+### Which subscription the resources go in
+
+`RESOURCE_SUBSCRIPTION_ID` pins the subscription the resource group, storage
+account and container are created in. Left empty, every `az` call resolves
+against the CLI's active subscription, which after `az login --tenant <id>` is
+whichever one Azure returned first — not a choice anyone made, and not stable
+across the tenants in an `onboard-all` run. An unpinned run says which
+subscription it landed on, so you can see what you got.
+
+It is a *different setting* from `SUBSCRIPTIONS`, which is an allowlist of whose
+**costs** get exported under `EXPORT_SCOPE=subscription`. Where the storage
+lives and which subscription's spend is exported are independent: a tenant can
+export at `billingAccount` scope (covering every subscription) while its storage
+sits in one particular subscription.
+
+`make preflight` lists each tenant's subscriptions in its `SUBS` column, which is
+where to get the ids.
+
+Setting this on a tenant that has already been onboarded does not move the
+existing storage account — it creates a second one, and Kion has no API for
+editing an existing Azure billing source, so the old source needs fixing by hand
+in the UI. Pin it before the first run.
 
 See `.env.example` and `tenants/example.env.example` for the full list,
 including `EXPORT_API_VERSION` — the Cost Management Exports API version, which

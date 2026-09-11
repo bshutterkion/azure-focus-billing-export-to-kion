@@ -85,4 +85,27 @@ grep -qE '^FOCUS prefix:[[:space:]]+[A-Za-z0-9]' "$TEST_TMP/stderr" \
   && fail "a prefix value was printed even though none was supplied"
 teardown_test
 
+# The storage account may not live in the CLI's active subscription. Both
+# lookups here feed the billing source: the account id becomes the Storage Blob
+# Data Reader role scope, and primaryEndpoints.blob becomes the endpoint Kion
+# reads from. Resolved in the wrong subscription they fail, or -- worse, where
+# names collide -- succeed against the wrong account.
+setup_test "--subscription reaches both storage account lookups"
+az_state APP_ID "app-42"; az_state SP_OID "sp-1"; az_state TENANT_ID "t-1"
+az_state BLOB_ENDPOINT "https://example.blob.core.windows.net"
+cd "$TEST_TMP" || exit 1
+bash "$S" --resource-group rg --storage-account sa --container focus \
+  --subscription "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" >/dev/null 2>&1
+assert_az_called "storage account show .*--query id .*--subscription aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+assert_az_called "storage account show .*primaryEndpoints.blob.*--subscription aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+teardown_test
+
+setup_test "sends no --subscription flag when none is given"
+az_state APP_ID "app-42"; az_state SP_OID "sp-1"; az_state TENANT_ID "t-1"
+az_state BLOB_ENDPOINT "https://example.blob.core.windows.net"
+cd "$TEST_TMP" || exit 1
+bash "$S" --resource-group rg --storage-account sa --container focus >/dev/null 2>&1
+assert_az_not_called "--subscription"
+teardown_test
+
 finish_tests

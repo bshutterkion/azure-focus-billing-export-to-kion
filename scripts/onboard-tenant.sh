@@ -39,6 +39,15 @@ RG="$(cfg_get "$TENANT_FILE" RESOURCE_GROUP)"
 STORAGE="$(cfg_get "$TENANT_FILE" STORAGE_ACCOUNT)"
 CONTAINER="$(cfg_get "$TENANT_FILE" CONTAINER)"
 LOCATION="$(cfg_get "$TENANT_FILE" LOCATION)"
+
+# Which subscription the resource group, storage account and container are
+# created in. Deliberately read from the tenant file only -- no capture-first
+# fallback to an inherited value, unlike AZURE_CLOUD and the export settings
+# below. A subscription id identifies one tenant's subscription and nothing
+# else, so a shared .env default could only ever be wrong for every tenant but
+# one, and inheriting it silently is exactly the failure the guard further down
+# exists to catch. Same treatment as RESOURCE_GROUP/STORAGE_ACCOUNT above.
+RESOURCE_SUBSCRIPTION_ID="$(cfg_get "$TENANT_FILE" RESOURCE_SUBSCRIPTION_ID)"
 PREFIX="$(cfg_get "$TENANT_FILE" EXPORT_PREFIX)"; PREFIX="${PREFIX:-${EXPORT_PREFIX:-focus}}"
 
 # EXPORT_SCOPE follows the same capture-first precedence as AZURE_CLOUD
@@ -132,11 +141,56 @@ if [ "$active_cloud" != "$AZURE_CLOUD" ]; then
   exit 1
 fi
 
+# RESOURCE_SUBSCRIPTION_ID gets the same treatment as the tenant and cloud
+# checks above, and for the same reason: it is a hand-typed value that decides
+# where resources land, and getting it wrong produces right data in the wrong
+# place with no error.
+#
+# `az account list` returns every subscription in the CLI profile for this
+# cloud, across every tenant that has ever signed into it -- and onboard-all.sh
+# signs into each tenant in turn, so by the second tenant the profile holds the
+# first tenant's subscriptions too. An id copied from the wrong row (or left
+# behind from a previous customer's file) is therefore usually still *valid*,
+# just not this tenant's: with access, the run would create this customer's
+# storage inside another customer's tenant and register it in Kion without
+# complaint. Filter by the tenant being onboarded and check membership here.
+if [ -n "$RESOURCE_SUBSCRIPTION_ID" ]; then
+  guid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  if [[ ! "$RESOURCE_SUBSCRIPTION_ID" =~ $guid_re ]]; then
+    log_err "RESOURCE_SUBSCRIPTION_ID '$RESOURCE_SUBSCRIPTION_ID' in $TENANT_FILE is not a subscription id"
+    log_err "expected a bare GUID (8-4-4-4-12 hex characters)"
+    exit 1
+  fi
+  tenant_subs="$(az account list --query "[?tenantId=='$TENANT_ID'].id" -o tsv | tr '\n' ' ')"
+  sub_found=0
+  for s in $tenant_subs; do
+    [ "$s" = "$RESOURCE_SUBSCRIPTION_ID" ] && sub_found=1
+  done
+  if [ "$sub_found" -eq 0 ]; then
+    log_err "RESOURCE_SUBSCRIPTION_ID '$RESOURCE_SUBSCRIPTION_ID' is not a subscription of tenant $TENANT_ID"
+    log_err "subscriptions visible in this tenant:${tenant_subs:+ $tenant_subs}"
+    log_err "check $TENANT_FILE; creating this tenant's storage in another tenant's subscription is what this check exists to prevent"
+    exit 1
+  fi
+  log_info "resources will be created in subscription $RESOURCE_SUBSCRIPTION_ID"
+else
+  # Not an error -- every tenant file predating this setting relies on the
+  # active subscription -- but it must not be invisible either. "It arbitrarily
+  # chooses a subscription" is only arbitrary while nothing says which one.
+  active_sub="$(az account show --query id -o tsv 2>/dev/null || echo "")"
+  log_warn "RESOURCE_SUBSCRIPTION_ID is unset; using the CLI's active subscription ${active_sub:-<unknown>}. Set RESOURCE_SUBSCRIPTION_ID in $TENANT_FILE to pin it."
+fi
+
 # 2) storage
 BLOB_ENDPOINT="$("$HERE/ensure-storage.sh" --resource-group "$RG" --storage-account "$STORAGE" \
-  --container "$CONTAINER" ${LOCATION:+--location "$LOCATION"})"
+  --container "$CONTAINER" ${LOCATION:+--location "$LOCATION"} \
+  ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"})"
 require_value "$BLOB_ENDPOINT" "the blob endpoint" "ensure-storage.sh"
-STORAGE_ID="$(az storage account show --name "$STORAGE" --resource-group "$RG" --query id -o tsv)"
+# This id becomes the export's deliveryInfo destination and (in
+# create-kion-app.sh) the Storage Blob Data Reader role scope, so it has to be
+# resolved in the same subscription ensure-storage.sh just used.
+STORAGE_ID="$(az storage account show --name "$STORAGE" --resource-group "$RG" --query id -o tsv \
+  ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"})"
 report_step storage ok
 
 # 3) exports — before the billing source, so Kion is never pointed at an
@@ -190,6 +244,7 @@ if [ "$ONLY" != "exports" ]; then
   # diverging is the branch's original headline defect.
   app_out="$("$HERE/create-kion-app.sh" --resource-group "$RG" --storage-account "$STORAGE" \
     --container "$CONTAINER" --prefix "$KION_PREFIX" \
+    ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"} \
     ${MG:+--management-group "$MG"} ${KION_HOST:+--kion-url "$KION_HOST"})"
   APP_ID="$(printf '%s\n' "$app_out" | sed -n 's/^APP_ID=//p')"
   TENANT_DOMAIN="$(printf '%s\n' "$app_out" | sed -n 's/^TENANT_DOMAIN=//p')"
