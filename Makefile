@@ -1,4 +1,4 @@
-.PHONY: help preflight onboard onboard-all exports kion-source status test
+.PHONY: help preflight onboard onboard-all exports kion-source app status test
 
 TENANTS_DIR ?= tenants
 TENANT ?=
@@ -37,6 +37,10 @@ exports: ## Re-run only the FOCUS export creation for one tenant: make exports T
 kion-source: ## Re-run only the Kion billing-source registration for one tenant: make kion-source TENANT=<name>
 	$(require_tenant)
 	scripts/onboard-tenant.sh --tenant-file "$(TENANT_FILE)" --only kion-source
+
+app: ## Create only the app registration for one tenant, no storage or exports: make app TENANT=<name>
+	$(require_tenant)
+	scripts/onboard-tenant.sh --tenant-file "$(TENANT_FILE)" --only app
 
 status: ## Print each tenant's cloud, billing model and KION_PAYER_ID state. Read-only; makes no Azure or Kion calls.
 	@found=0; \

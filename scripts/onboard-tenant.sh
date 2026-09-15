@@ -18,8 +18,8 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$TENANT_FILE" ] && [ -f "$TENANT_FILE" ] || { log_err "tenant file not found: $TENANT_FILE"; exit 2; }
 case "$ONLY" in
-  ""|exports|kion-source) : ;;
-  *) log_err "--only must be 'exports' or 'kion-source', got '$ONLY'"; exit 2 ;;
+  ""|exports|kion-source|app) : ;;
+  *) log_err "--only must be 'exports', 'kion-source' or 'app', got '$ONLY'"; exit 2 ;;
 esac
 
 TENANT_ID="$(cfg_get "$TENANT_FILE" TENANT_ID)"
@@ -68,6 +68,51 @@ MG="$(cfg_get "$TENANT_FILE" MANAGEMENT_GROUP)"
 # create-focus-exports.sh's default, and 2023-08-01 and earlier cannot
 # create FOCUS exports at all, so a tenant may need to pin a specific
 # version independent of (and overriding) the shared .env default.
+# BILLING_MODEL is capture-first like AZURE_CLOUD. It reaches
+# create-focus-exports.sh so that script can refuse subscription scope under
+# MCA, where the export is created successfully and then writes nothing.
+inherited_billing_model="${BILLING_MODEL:-}"
+tf_billing_model="$(cfg_get "$TENANT_FILE" BILLING_MODEL)"
+BILLING_MODEL="${tf_billing_model:-${inherited_billing_model:-MCA}}"
+
+# ONBOARD_MODE decides how much of the pipeline this tenant gets.
+#
+#   full        storage -> exports -> app -> billing source (the original shape)
+#   management  app only
+#
+# management exists because a customer tenant under a shared MCA billing
+# account has no export of its own that carries data: the only scope with data
+# is the billing account, and that lives in the roll-up tenant and covers every
+# tenant at once. The useful per-tenant work is then the app registration Kion
+# manages the tenant and its subscriptions with, and nothing else.
+inherited_mode="${ONBOARD_MODE:-}"
+tf_mode="$(cfg_get "$TENANT_FILE" ONBOARD_MODE)"
+ONBOARD_MODE="${tf_mode:-${inherited_mode:-full}}"
+case "$ONBOARD_MODE" in
+  full|management) : ;;
+  *) log_err "ONBOARD_MODE must be 'full' or 'management', got '$ONBOARD_MODE'"; exit 2 ;;
+esac
+
+# Opt-in, and never inferred from ONBOARD_MODE: this grants the app
+# roleAssignments write/delete and subscriptions/write at the management-group
+# scope, which is a decision to make per customer rather than a side effect of
+# choosing a mode.
+inherited_subcreate="${ENABLE_SUBSCRIPTION_CREATION:-}"
+tf_subcreate="$(cfg_get "$TENANT_FILE" ENABLE_SUBSCRIPTION_CREATION)"
+ENABLE_SUBSCRIPTION_CREATION="${tf_subcreate:-$inherited_subcreate}"
+# A typo must not read as false. Quietly granting nothing, for a setting whose
+# only purpose is to grant something, is the silent-wrong class this codebase
+# keeps getting bitten by -- so anything unrecognised is an error, not a no.
+subcreate_lc="$(printf '%s' "$ENABLE_SUBSCRIPTION_CREATION" | tr '[:upper:]' '[:lower:]')"
+case "$subcreate_lc" in
+  "")          SUB_CREATION=0 ;;
+  1|true|yes)  SUB_CREATION=1 ;;
+  *)
+    log_err "ENABLE_SUBSCRIPTION_CREATION must be empty, 1, true or yes; got '$ENABLE_SUBSCRIPTION_CREATION'"
+    exit 2
+    ;;
+esac
+
 inherited_export_api_version="${EXPORT_API_VERSION:-}"
 tf_export_api_version="$(cfg_get "$TENANT_FILE" EXPORT_API_VERSION)"
 EXPORT_API_VERSION="${tf_export_api_version:-$inherited_export_api_version}"
@@ -104,6 +149,23 @@ report_step_detail() { printf 'STEP_DETAIL=%s\n' "$1"; }
 require_value() {
   [ -n "$1" ] || { log_err "$3 did not produce a value for $2"; exit 1; }
 }
+
+# Which steps this run performs. ONBOARD_MODE=management and --only app both
+# reduce to "the app registration and nothing else"; the difference is only
+# that one is a durable property of the tenant and the other of this run.
+#
+# --only exports and --only kion-source both keep storage on, because each
+# still needs the storage account id (and kion-source the blob endpoint) that
+# step produces. Only the app-only paths turn it off.
+DO_STORAGE=1; DO_EXPORTS=1; DO_APP=1; DO_BILLING=1
+if [ "$ONBOARD_MODE" = management ] || [ "$ONLY" = app ]; then
+  DO_STORAGE=0; DO_EXPORTS=0; DO_BILLING=0
+else
+  case "$ONLY" in
+    exports)     DO_APP=0; DO_BILLING=0 ;;
+    kion-source) DO_EXPORTS=0 ;;
+  esac
+fi
 
 # 1) log in to this tenant
 if [ "$SKIP_LOGIN" -eq 0 ]; then
@@ -154,7 +216,22 @@ fi
 # just not this tenant's: with access, the run would create this customer's
 # storage inside another customer's tenant and register it in Kion without
 # complaint. Filter by the tenant being onboarded and check membership here.
-if [ -n "$RESOURCE_SUBSCRIPTION_ID" ]; then
+if [ "$DO_STORAGE" -eq 0 ]; then
+  # No resources are created in this mode, so the storage keys are inert. Say
+  # so rather than ignoring them: an operator who filled in STORAGE_ACCOUNT and
+  # then finds no storage account has no way to tell a deliberate skip from a
+  # broken run, and silently ignoring configuration somebody typed on purpose
+  # is this project's most repeated bug.
+  ignored=""
+  for k in RESOURCE_GROUP STORAGE_ACCOUNT CONTAINER LOCATION RESOURCE_SUBSCRIPTION_ID BILLING_SCOPE_ID; do
+    if [ -n "$(cfg_get "$TENANT_FILE" "$k")" ]; then
+      ignored="$ignored $k"
+    fi
+  done
+  if [ -n "$ignored" ]; then
+    log_warn "no storage or exports are created in this mode; these keys in $TENANT_FILE are ignored:$ignored"
+  fi
+elif [ -n "$RESOURCE_SUBSCRIPTION_ID" ]; then
   guid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
   if [[ ! "$RESOURCE_SUBSCRIPTION_ID" =~ $guid_re ]]; then
     log_err "RESOURCE_SUBSCRIPTION_ID '$RESOURCE_SUBSCRIPTION_ID' in $TENANT_FILE is not a subscription id"
@@ -182,16 +259,21 @@ else
 fi
 
 # 2) storage
-BLOB_ENDPOINT="$("$HERE/ensure-storage.sh" --resource-group "$RG" --storage-account "$STORAGE" \
-  --container "$CONTAINER" ${LOCATION:+--location "$LOCATION"} \
-  ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"})"
-require_value "$BLOB_ENDPOINT" "the blob endpoint" "ensure-storage.sh"
-# This id becomes the export's deliveryInfo destination and (in
-# create-kion-app.sh) the Storage Blob Data Reader role scope, so it has to be
-# resolved in the same subscription ensure-storage.sh just used.
-STORAGE_ID="$(az storage account show --name "$STORAGE" --resource-group "$RG" --query id -o tsv \
-  ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"})"
-report_step storage ok
+BLOB_ENDPOINT=""; STORAGE_ID=""
+if [ "$DO_STORAGE" -eq 1 ]; then
+  BLOB_ENDPOINT="$("$HERE/ensure-storage.sh" --resource-group "$RG" --storage-account "$STORAGE" \
+    --container "$CONTAINER" ${LOCATION:+--location "$LOCATION"} \
+    ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"})"
+  require_value "$BLOB_ENDPOINT" "the blob endpoint" "ensure-storage.sh"
+  # This id becomes the export's deliveryInfo destination and (in
+  # create-kion-app.sh) the Storage Blob Data Reader role scope, so it has to be
+  # resolved in the same subscription ensure-storage.sh just used.
+  STORAGE_ID="$(az storage account show --name "$STORAGE" --resource-group "$RG" --query id -o tsv \
+    ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"})"
+  report_step storage ok
+else
+  report_step storage skipped
+fi
 
 # 3) exports — before the billing source, so Kion is never pointed at an
 #    empty container with nothing feeding it. --only kion-source skips this
@@ -200,13 +282,16 @@ RUN_NOW_FLAG=""
 [ "$NO_RUN_NOW" -eq 1 ] && RUN_NOW_FLAG="--no-run-now"
 
 EXPORTS_OUT=""
-if [ "$ONLY" != "kion-source" ]; then
+if [ "$DO_EXPORTS" -eq 1 ]; then
   # --tenant-id is what keeps subscription discovery from seeing the previous
   # tenant's subscriptions, which are still in this CLI profile after
   # onboard-all.sh signed into them earlier in the same loop.
+  #
+  # --billing-model lets create-focus-exports.sh refuse subscription scope
+  # under MCA, where the export is created and then writes nothing at all.
   EXPORTS_OUT="$("$HERE/create-focus-exports.sh" \
     --storage-account-id "$STORAGE_ID" --container "$CONTAINER" --prefix "$PREFIX" \
-    --scope "$SCOPE" --tenant-id "$TENANT_ID" \
+    --scope "$SCOPE" --tenant-id "$TENANT_ID" --billing-model "$BILLING_MODEL" \
     ${BILLING_SCOPE_ID:+--billing-scope-id "$BILLING_SCOPE_ID"} \
     ${SUBSCRIPTIONS:+--subscriptions "$SUBSCRIPTIONS"} \
     ${FOCUS_VERSION:+--focus-version "$FOCUS_VERSION"} \
@@ -221,31 +306,61 @@ fi
 
 # 4) & 5) the app Kion authenticates as, and the Kion billing source itself.
 # --only exports skips both to re-run just the FOCUS export creation.
-if [ "$ONLY" != "exports" ]; then
+if [ "$DO_APP" -eq 1 ]; then
   # --only kion-source skipped step 3, so EXPORTS_OUT never got the
   # KION_PREFIX= line create-focus-exports.sh normally reports. Recompute it
   # with --print-only: same scope-resolution and naming logic, including the
   # multi-subscription hard-fail, but no Azure call. Never reconstruct the
   # path by string-concatenation here — create-focus-exports.sh is the only
   # script that knows both rootFolderPath and the export name it chose.
-  if [ -z "$EXPORTS_OUT" ]; then
-    EXPORTS_OUT="$("$HERE/create-focus-exports.sh" --print-only \
-      --storage-account-id "$STORAGE_ID" --container "$CONTAINER" --prefix "$PREFIX" \
-      --scope "$SCOPE" --tenant-id "$TENANT_ID" \
-      ${BILLING_SCOPE_ID:+--billing-scope-id "$BILLING_SCOPE_ID"} \
-      ${SUBSCRIPTIONS:+--subscriptions "$SUBSCRIPTIONS"})"
+  #
+  # Skipped entirely when there is no billing source to point anywhere: an
+  # app-only run has no export, so there is no prefix to compute and nothing
+  # for a guessed one to do but mislead whoever reads the banner.
+  KION_PREFIX=""
+  if [ "$DO_BILLING" -eq 1 ]; then
+    if [ -z "$EXPORTS_OUT" ]; then
+      EXPORTS_OUT="$("$HERE/create-focus-exports.sh" --print-only \
+        --storage-account-id "$STORAGE_ID" --container "$CONTAINER" --prefix "$PREFIX" \
+        --scope "$SCOPE" --tenant-id "$TENANT_ID" --billing-model "$BILLING_MODEL" \
+        ${BILLING_SCOPE_ID:+--billing-scope-id "$BILLING_SCOPE_ID"} \
+        ${SUBSCRIPTIONS:+--subscriptions "$SUBSCRIPTIONS"})"
+    fi
+    KION_PREFIX="$(printf '%s\n' "$EXPORTS_OUT" | sed -n 's/^KION_PREFIX=//p' | tail -n1)"
+    require_value "$KION_PREFIX" "KION_PREFIX" "create-focus-exports.sh"
   fi
-  KION_PREFIX="$(printf '%s\n' "$EXPORTS_OUT" | sed -n 's/^KION_PREFIX=//p' | tail -n1)"
-  require_value "$KION_PREFIX" "KION_PREFIX" "create-focus-exports.sh"
 
-  # --prefix "$KION_PREFIX", never the bare EXPORT_PREFIX: create-kion-app.sh's
+  # Storage arguments are passed only when this run created storage.
+  # create-kion-app.sh already skips the Storage Blob Data Reader grant and
+  # prints no FOCUS endpoint/container/prefix lines when they are absent, which
+  # is exactly right for an app-only run: there is no container to grant on.
+  #
+  # --prefix is "$KION_PREFIX", never the bare EXPORT_PREFIX: create-kion-app.sh's
   # framed summary is what an operator copies into the Kion UI, and it must
   # print the same value that reaches the billing source below. The two
   # diverging is the branch's original headline defect.
-  app_out="$("$HERE/create-kion-app.sh" --resource-group "$RG" --storage-account "$STORAGE" \
-    --container "$CONTAINER" --prefix "$KION_PREFIX" \
-    ${RESOURCE_SUBSCRIPTION_ID:+--subscription "$RESOURCE_SUBSCRIPTION_ID"} \
-    ${MG:+--management-group "$MG"} ${KION_HOST:+--kion-url "$KION_HOST"})"
+  app_args=()
+  if [ "$DO_STORAGE" -eq 1 ]; then
+    app_args+=(--resource-group "$RG" --storage-account "$STORAGE" --container "$CONTAINER")
+    if [ -n "$RESOURCE_SUBSCRIPTION_ID" ]; then
+      app_args+=(--subscription "$RESOURCE_SUBSCRIPTION_ID")
+    fi
+  fi
+  if [ -n "$KION_PREFIX" ]; then
+    app_args+=(--prefix "$KION_PREFIX")
+  fi
+  if [ -n "$MG" ]; then
+    app_args+=(--management-group "$MG")
+  fi
+  if [ -n "${KION_HOST:-}" ]; then
+    app_args+=(--kion-url "$KION_HOST")
+  fi
+  # Explicit `if`, not `[ ... ] && app_args+=(...)`: this file relies on set -e,
+  # and a bare &&-list guard rests on an exemption that is easy to misread.
+  if [ "$SUB_CREATION" -eq 1 ]; then
+    app_args+=(--enable-subscription-creation)
+  fi
+  app_out="$("$HERE/create-kion-app.sh" ${app_args[@]+"${app_args[@]}"})"
   APP_ID="$(printf '%s\n' "$app_out" | sed -n 's/^APP_ID=//p')"
   TENANT_DOMAIN="$(printf '%s\n' "$app_out" | sed -n 's/^TENANT_DOMAIN=//p')"
   CREDENTIAL_FILE="$(printf '%s\n' "$app_out" | sed -n 's/^CREDENTIAL_FILE=//p')"
@@ -255,7 +370,15 @@ if [ "$ONLY" != "exports" ]; then
   CLIENT_SECRET="$(cfg_get "$CREDENTIAL_FILE" AZURE_CLIENT_SECRET)"
   require_value "$CLIENT_SECRET" "AZURE_CLIENT_SECRET" "$CREDENTIAL_FILE"
   report_step app ok
+else
+  report_step app skipped
+fi
 
+# 5) the Kion billing source. Separate from the app step now, because an
+# app-only run does both halves of that pair differently: it creates the app
+# and registers nothing, since the tenant's spend arrives through another
+# tenant's export entirely.
+if [ "$DO_BILLING" -eq 1 ]; then
   # Exit 3 means "source already existed, prefix not updated": a warning, not a
   # failure, so it must not abort the run under set -e -- but it must also not
   # be summarised as plain "ok". Anything else keeps its own exit code.
@@ -281,12 +404,15 @@ if [ "$ONLY" != "exports" ]; then
     *) exit "$bs_rc" ;;
   esac
 else
-  report_step app skipped
   report_step billing-source skipped
 fi
 
-case "$ONLY" in
-  exports)     log_info "tenant $TENANT_ID: FOCUS exports re-created" ;;
-  kion-source) log_info "tenant $TENANT_ID: Kion billing source re-registered" ;;
-  *)           log_info "tenant $TENANT_ID onboarded" ;;
-esac
+if [ "$ONBOARD_MODE" = management ] || [ "$ONLY" = app ]; then
+  log_info "tenant $TENANT_ID: app registration ready; this tenant's spend is expected to arrive through another tenant's export"
+else
+  case "$ONLY" in
+    exports)     log_info "tenant $TENANT_ID: FOCUS exports re-created" ;;
+    kion-source) log_info "tenant $TENANT_ID: Kion billing source re-registered" ;;
+    *)           log_info "tenant $TENANT_ID onboarded" ;;
+  esac
+fi

@@ -13,6 +13,57 @@ SUB_B="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 SUB_X="cccccccc-cccc-cccc-cccc-cccccccccccc"
 SUB_Y="dddddddd-dddd-dddd-dddd-dddddddddddd"
 
+# Verified live on 2026-09-15 against a real MCA billing account with the
+# billing profile's "View charges" policy ENABLED: a subscription-scope FOCUS
+# export is created, runs, and writes no rows and no manifest at all. Azure
+# reports success at every step, so nothing the tool already checks can catch
+# it -- the billing source would be registered against a prefix that never
+# gains a manifest, and the tenant would show no spend with no error anywhere.
+# Same missing-money failure as the >1 subscription guard below, reached by a
+# different route, so it gets the same treatment: refuse before creating.
+setup_test "subscription scope is refused under MCA, where it yields no data"
+if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+   --billing-model MCA --subscriptions "$SUB_A" >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "MCA"
+assert_file_contains "$TEST_TMP/err" "billingAccount"
+assert_az_not_called "rest --method put"
+teardown_test
+
+# The finding is MCA-specific and must not be generalised. Under a Microsoft
+# Partner Agreement, subscription scope is the ONLY scope a customer tenant
+# has, so blanket-refusing it would make every CSP tenant un-onboardable on
+# the strength of evidence gathered somewhere else entirely.
+setup_test "subscription scope still works under CSP"
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+  --billing-model CSP --subscriptions "$SUB_A" >/dev/null
+rc=$?
+assert_eq "$rc" "0"
+assert_az_called "rest --method put"
+teardown_test
+
+setup_test "billingAccount scope is unaffected under MCA"
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+  --billing-model MCA --scope billingAccount \
+  --billing-scope-id /providers/Microsoft.Billing/billingAccounts/ba >/dev/null
+rc=$?
+assert_eq "$rc" "0"
+assert_az_called "rest --method put"
+teardown_test
+
+# A standalone caller that never says which agreement it is under must not be
+# guessed at: defaulting to MCA here would block CSP users who call this script
+# directly. onboard-tenant.sh always passes --billing-model, so the path that
+# matters is covered either way.
+setup_test "subscription scope is allowed when no --billing-model is given"
+bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
+  --subscriptions "$SUB_A" >/dev/null
+rc=$?
+assert_eq "$rc" "0"
+assert_az_called "rest --method put"
+teardown_test
+
 setup_test "subscription scope with more than one subscription fails hard and creates nothing"
 if bash "$S" --storage-account-id "$SAID" --container focus --prefix focus \
    --subscriptions "$SUB_A $SUB_B" >/dev/null 2>"$TEST_TMP/err"; then fail "expected non-zero exit"; fi

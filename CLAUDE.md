@@ -21,6 +21,7 @@ was right.
     make onboard-all                # every tenants/*.env, continues past failures
     make exports TENANT=<name>      # re-run only the FOCUS export step
     make kion-source TENANT=<name>  # re-run only the app + billing-source steps
+    make app TENANT=<name>          # app registration only; no storage, exports or Kion call
     make status                     # read tenants/*.env; no Azure or Kion calls
     make test                       # whole suite
 
@@ -124,6 +125,65 @@ tenants from one checkout. Left to disagree, a run creates correct Gov storage
 and registers it in Kion as Commercial — right data, wrong account type, no
 error. Hence the hard check in `onboard-tenant.sh`; it deliberately runs even
 under `--skip-login`, which skips the sign-in, not the verification.
+
+### Under MCA, only billing-account scope carries data
+
+Verified 2026-09-15 against a real MCA billing account with the billing
+profile's **View charges** policy enabled: a subscription-scope FOCUS export is
+created, schedules, runs, and writes **no rows and no manifest**. Azure reports
+success at every step, so the PUT, the run-now and the container check all pass
+while the result is empty. Kion then watches a prefix that never gains a
+manifest and the tenant shows no spend, with no error anywhere.
+
+`create-focus-exports.sh` therefore refuses `--scope subscription` when
+`--billing-model MCA`, next to the `>1 subscription` guard, which exists to stop
+the same missing-money outcome reached another way. The controller passes
+`--billing-model` for that reason.
+
+The refusal is scoped to an explicit MCA and must stay that way. Under a
+Microsoft Partner Agreement, subscription scope is the only scope a customer
+tenant has, so generalising the guard would make every CSP tenant
+un-onboardable on evidence gathered somewhere else. `create-focus-exports.sh`
+deliberately has no default for `--billing-model`: a standalone caller that
+does not say is not guessed at.
+
+The consequence for the tool's shape: under one MCA billing account spanning
+several tenants, there is no per-tenant export that carries anything, and the
+one export that does is created in the roll-up tenant and covers every tenant at
+once. Per-tenant billing data is not something this tool can produce there.
+
+### ONBOARD_MODE: not every tenant gets an export
+
+`full` (default) is storage → exports → app → billing source. `management` is
+the app registration alone: no storage, no export, nothing posted to Kion, and
+`KION_PAYER_ID` is never written. It exists for the MCA case above, where the
+useful per-tenant work is the app registration Kion manages the tenant with.
+
+`--only app` is the same reduction for a single run; `ONBOARD_MODE` is the
+durable form, and it is what lets `onboard-all.sh` mix billing tenants and
+management-only tenants in one pass.
+
+The step flags (`DO_STORAGE`/`DO_EXPORTS`/`DO_APP`/`DO_BILLING`) are derived in
+one place near the top of the controller. `--only exports` and `--only
+kion-source` both keep storage on, because each still needs the storage account
+id that step produces.
+
+In management mode the controller passes `create-kion-app.sh` no storage
+arguments at all. That script already skips the Storage Blob Data Reader grant
+and prints no FOCUS prefix when they are absent, so there is no special case to
+add — and a prefix printed for a tenant with no export would be a value an
+operator could paste into Kion that can never match anything.
+
+Storage keys left set on a management tenant are reported as ignored. Silently
+dropping configuration somebody typed on purpose is this project's most
+repeated bug, and "I set STORAGE_ACCOUNT and got no storage account" is
+indistinguishable from a broken run without the warning.
+
+`ENABLE_SUBSCRIPTION_CREATION` is opt-in and never inferred from the mode: it
+grants `roleAssignments` write/delete and `subscriptions/write` at the
+management-group scope, which is a per-customer decision, not a side effect of
+choosing a mode. An unrecognised value is an error, not a false — a setting
+whose only purpose is to grant something must never fail quiet.
 
 ### One export per billing source is a hard constraint
 

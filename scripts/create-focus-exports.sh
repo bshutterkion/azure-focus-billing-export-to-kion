@@ -25,6 +25,9 @@ set -euo pipefail
 
 STORAGE_ID=""; CONTAINER=""; PREFIX="focus"
 SCOPE="subscription"; BILLING_SCOPE_ID=""; SUBSCRIPTIONS=""; TENANT_ID=""
+# Deliberately empty rather than defaulting to MCA: see the guard in the
+# subscription case below, which only fires on an explicit MCA.
+BILLING_MODEL=""
 FOCUS_VERSION="1.0"; RECURRENCE="Daily"; TIMEFRAME="MonthToDate"
 API_VERSION="2025-03-01"
 PRINT_ONLY=0; NO_RUN_NOW=0
@@ -37,6 +40,7 @@ while [ $# -gt 0 ]; do
     --scope)              SCOPE="$2"; shift 2 ;;
     --billing-scope-id)   BILLING_SCOPE_ID="$2"; shift 2 ;;
     --subscriptions)      SUBSCRIPTIONS="$2"; shift 2 ;;
+    --billing-model)      BILLING_MODEL="$2"; shift 2 ;;
     --tenant-id)          TENANT_ID="$2"; shift 2 ;;
     --focus-version)      FOCUS_VERSION="$2"; shift 2 ;;
     --recurrence)         RECURRENCE="$2"; shift 2 ;;
@@ -65,6 +69,29 @@ resolve_cloud
 SCOPES=""
 case "$SCOPE" in
   subscription)
+    # Verified on 2026-09-15 against a real MCA billing account whose billing
+    # profile has "View charges" ENABLED: a subscription-scope FOCUS export is
+    # created, schedules, runs -- and writes no rows and no manifest at all.
+    # Under MCA the cost data lives only at the billing account, which for a
+    # multi-tenant enrollment is the roll-up tenant, not the customer tenant.
+    #
+    # Every check this tool performs passes in that state: the PUT succeeds,
+    # the run-now succeeds, the container exists. Kion is then pointed at a
+    # prefix that never gains a manifest, and the tenant shows no spend with
+    # no error anywhere. That is the same missing-money failure the >1
+    # subscription guard below exists to prevent, so it gets the same
+    # treatment -- refuse before creating, rather than warn afterwards.
+    #
+    # Scoped to an explicit MCA on purpose. Under a Microsoft Partner
+    # Agreement, subscription scope is the only scope a customer tenant has,
+    # so generalising this would make every CSP tenant un-onboardable on the
+    # strength of evidence gathered somewhere else entirely.
+    if [ "$BILLING_MODEL" = "MCA" ]; then
+      log_err "EXPORT_SCOPE=subscription produces no data under MCA: the export is created and runs, but writes no rows and no manifest"
+      log_err "MCA cost data is only available at billing-account scope, which for a multi-tenant enrollment lives in the roll-up tenant"
+      log_err "set EXPORT_SCOPE=billingAccount (or billingProfile) with BILLING_SCOPE_ID, or ONBOARD_MODE=management if this tenant is billed through another tenant's export"
+      exit 1
+    fi
     if [ -z "$SUBSCRIPTIONS" ]; then
       # `az account list` returns every subscription in the CLI profile for the
       # current cloud -- across every tenant that has ever signed in to it, not

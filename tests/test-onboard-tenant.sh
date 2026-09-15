@@ -17,11 +17,34 @@ assert_rc_zero() { # RC LABEL
   [ "$1" -eq 0 ] || fail "$2 exited $1, expected 0"
 }
 
+# The default fixture is MCA at billingAccount scope, which is the only
+# combination that actually produces data under MCA and is what ships in
+# .env. It used to be MCA + subscription scope, which the MCA guard now
+# refuses outright -- correctly, since that combination creates an export
+# that writes no rows and no manifest.
 write_tenant() {
   cat > "$TEST_TMP/t.env" <<EOF
 TENANT_ID=t-1
 AZURE_CLOUD=AzureUSGovernment
 BILLING_MODEL=MCA
+RESOURCE_GROUP=rg
+STORAGE_ACCOUNT=sa
+CONTAINER=focus
+LOCATION=usgovvirginia
+EXPORT_SCOPE=billingAccount
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
+KION_PAYER_ID=
+EOF
+}
+
+# Subscription scope is still legitimate under a Microsoft Partner Agreement,
+# where it is the only scope a customer tenant has. Tests that need to exercise
+# the subscription-scope path use this rather than the MCA fixture.
+write_csp_subscription_tenant() {
+  cat > "$TEST_TMP/t.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureUSGovernment
+BILLING_MODEL=CSP
 RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
@@ -145,7 +168,8 @@ RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
 LOCATION=eastus
-EXPORT_SCOPE=subscription
+EXPORT_SCOPE=billingAccount
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
 KION_PAYER_ID=
 EOF
 az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureCloud; az_state RG_EXISTS 1; az_state SA_EXISTS 1
@@ -169,7 +193,8 @@ RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
 LOCATION=usgovvirginia
-EXPORT_SCOPE=subscription
+EXPORT_SCOPE=billingAccount
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
 KION_PAYER_ID=
 EOF
 az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
@@ -223,7 +248,8 @@ RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
 LOCATION=usgovvirginia
-EXPORT_SCOPE=subscription
+EXPORT_SCOPE=billingAccount
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
 EXPORT_API_VERSION=2025-03-01
 KION_PAYER_ID=
 EOF
@@ -264,7 +290,8 @@ RESOURCE_GROUP=rg
 STORAGE_ACCOUNT=sa
 CONTAINER=focus
 LOCATION=usgovvirginia
-EXPORT_SCOPE=subscription
+EXPORT_SCOPE=billingAccount
+BILLING_SCOPE_ID=/providers/Microsoft.Billing/billingAccounts/ba
 FOCUS_VERSION=1.2-preview
 EXPORT_RECURRENCE=Weekly
 EXPORT_TIMEFRAME=WeekToDate
@@ -332,7 +359,7 @@ assert_curl_called "/v1/payer/standalone"
 # Step 3 (which normally reports KION_PREFIX) was skipped entirely, so this
 # proves the --print-only recompute path in onboard-tenant.sh still gets the
 # right value to the billing source, without ever touching Azure.
-assert_curl_stdin_contains "\"focus_storage_prefix\":\"focus/$SUB_A/kion-focus-$SUB_A\""
+assert_curl_stdin_contains '"focus_storage_prefix":"focus/ba/kion-focus-ba"'
 teardown_test
 
 setup_test "rejects an unknown --only value"
@@ -348,7 +375,7 @@ assert_file_contains "$TEST_TMP/err" "exports.*kion-source"
 teardown_test
 
 setup_test "passes the exact KION_PREFIX from create-focus-exports.sh to kion-create-billing-source.sh (subscription scope)"
-write_tenant
+write_csp_subscription_tenant
 az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
@@ -508,8 +535,11 @@ assert_az_not_called "--subscription"
 assert_file_contains "$TEST_TMP/err" "RESOURCE_SUBSCRIPTION_ID.*sub-active"
 teardown_test
 
+# CSP, so the run reaches the >1 guard rather than being stopped earlier by the
+# MCA guard. Both refuse, but for different reasons, and this test is about the
+# multi-subscription one.
 setup_test "EXPORT_SCOPE=subscription with more than one subscription aborts before touching Kion"
-write_tenant
+write_csp_subscription_tenant
 az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
 az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
 az_state SUBSCRIPTIONS "$SUB_A,$SUB_B"
@@ -522,6 +552,202 @@ assert_file_contains "$TEST_TMP/err" "$SUB_A"
 assert_file_contains "$TEST_TMP/err" "$SUB_B"
 assert_az_not_called "rest --method put"
 [ -s "$TEST_TMP/curl.log" ] && fail "must not register a billing source when exports were never created"
+teardown_test
+
+# --- MCA subscription scope, through the controller -------------------------
+
+# MCA plus subscription scope is the combination that creates an export and
+# then writes no rows and no manifest. The controller has to pass BILLING_MODEL
+# down for create-focus-exports.sh to be able to refuse it, so this exercises
+# that hand-off rather than the guard in isolation.
+setup_test "an MCA tenant at subscription scope is refused before anything reaches Kion"
+cat > "$TEST_TMP/t.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureUSGovernment
+BILLING_MODEL=MCA
+RESOURCE_GROUP=rg
+STORAGE_ACCOUNT=sa
+CONTAINER=focus
+LOCATION=usgovvirginia
+EXPORT_SCOPE=subscription
+KION_PAYER_ID=
+EOF
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "MCA"
+assert_az_not_called "rest --method put"
+[ -s "$TEST_TMP/curl.log" ] && fail "must not register a billing source for an export that yields no data"
+teardown_test
+
+# --- ONBOARD_MODE=management ------------------------------------------------
+
+write_management_tenant() {
+  cat > "$TEST_TMP/t.env" <<EOF
+TENANT_ID=t-1
+AZURE_CLOUD=AzureUSGovernment
+BILLING_MODEL=MCA
+ONBOARD_MODE=management
+MANAGEMENT_GROUP=
+KION_PAYER_ID=
+EOF
+}
+
+# Under one MCA billing account spanning several tenants there is no per-tenant
+# export that carries data, so the only thing this tool can usefully do in a
+# customer tenant is create the app registration Kion manages it with.
+setup_test "management mode runs the app step and skips storage, exports and the billing source"
+write_management_tenant
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+out="$(KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login 2>/dev/null)"
+rc=$?
+assert_rc_zero "$rc" "management-mode run"
+case "$out" in *"STEP=app:ok"*) : ;; *) fail "app step not reported ok: $out" ;; esac
+for step in storage exports billing-source; do
+  case "$out" in *"STEP=$step:skipped"*) : ;; *) fail "no STEP=$step:skipped line: $out" ;; esac
+done
+assert_az_called "ad app"
+assert_az_called "role assignment create.*Owner.*managementGroups"
+assert_az_not_called "storage container create"
+assert_az_not_called "rest --method put"
+[ -s "$TEST_TMP/curl.log" ] && fail "management mode must not call Kion"
+teardown_test
+
+# No storage account exists in this mode, so asking for a blob-reader grant on
+# one would fail. create-kion-app.sh already skips it when the storage flags
+# are absent, so the controller must simply not pass them.
+setup_test "management mode grants no blob reader and prints no FOCUS prefix"
+write_management_tenant
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+  >/dev/null 2>"$TEST_TMP/err"
+rc=$?
+assert_rc_zero "$rc" "management-mode run"
+assert_az_not_called "Storage Blob Data Reader"
+grep -qE '^FOCUS prefix:' "$TEST_TMP/err" && fail "a FOCUS prefix was printed for a tenant that has no export"
+teardown_test
+
+setup_test "management mode does not write KION_PAYER_ID"
+write_management_tenant
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null 2>&1
+grep -qE '^KION_PAYER_ID=.+' "$TEST_TMP/t.env" && fail "management mode wrote a payer id"
+teardown_test
+
+# Silently ignoring config an operator deliberately typed is this project's
+# recurring failure shape. Someone who fills in STORAGE_ACCOUNT and then sees
+# no storage account must be told why, not left to guess.
+setup_test "management mode says which storage keys it is ignoring"
+write_management_tenant
+printf 'RESOURCE_GROUP=rg\nSTORAGE_ACCOUNT=sa\nRESOURCE_SUBSCRIPTION_ID=%s\n' "$SUB_A" >> "$TEST_TMP/t.env"
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+  >/dev/null 2>"$TEST_TMP/err"
+rc=$?
+assert_rc_zero "$rc" "management-mode run with storage keys set"
+assert_file_contains "$TEST_TMP/err" "STORAGE_ACCOUNT"
+assert_file_contains "$TEST_TMP/err" "ignored"
+teardown_test
+
+# The session guards are about which tenant and cloud the CLI is pointed at,
+# not about billing, so dropping the billing steps must not drop them.
+setup_test "management mode still refuses the wrong cloud"
+write_management_tenant
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureCloud
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "AzureCloud.*AzureUSGovernment"
+assert_az_not_called "ad app"
+teardown_test
+
+setup_test "rejects an unknown ONBOARD_MODE"
+write_management_tenant
+sed -i.bak 's/^ONBOARD_MODE=.*/ONBOARD_MODE=bogus/' "$TEST_TMP/t.env"
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+cd "$TEST_TMP" || exit 1
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "full.*management"
+teardown_test
+
+setup_test "--only app runs the app step alone for an otherwise full tenant"
+write_tenant
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment; az_state RG_EXISTS 1; az_state SA_EXISTS 1
+az_state BLOB_ENDPOINT "https://sa.blob.core.usgovcloudapi.net/"
+az_state SUBSCRIPTIONS "$SUB_A"; az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+out="$(KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login --only app 2>/dev/null)"
+rc=$?
+assert_rc_zero "$rc" "--only app run"
+assert_az_called "ad app"
+assert_az_not_called "storage container create"
+assert_az_not_called "rest --method put"
+[ -s "$TEST_TMP/curl.log" ] && fail "--only app must not call Kion"
+case "$out" in *"STEP=app:ok"*) : ;; *) fail "app step not reported ok: $out" ;; esac
+teardown_test
+
+setup_test "rejects an unknown --only value, naming app alongside the others"
+write_tenant
+if bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login --only bogus \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "app"
+teardown_test
+
+# --- ENABLE_SUBSCRIPTION_CREATION -------------------------------------------
+
+setup_test "subscription-creation rights are off unless the tenant opts in"
+write_management_tenant
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null 2>&1
+assert_az_not_called "Minimal subscription move"
+teardown_test
+
+setup_test "ENABLE_SUBSCRIPTION_CREATION grants the subscription-move role"
+write_management_tenant
+printf 'ENABLE_SUBSCRIPTION_CREATION=1\n' >> "$TEST_TMP/t.env"
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+az_state APP_ID "app-1"; az_state SP_OID "sp-1"
+cd "$TEST_TMP" || exit 1
+KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login >/dev/null 2>&1
+assert_az_called "Minimal subscription move"
+teardown_test
+
+# A typo must not read as false. Quietly granting nothing, for a setting whose
+# whole purpose is granting something, is the silent-wrong class again.
+setup_test "a malformed ENABLE_SUBSCRIPTION_CREATION fails loudly rather than meaning false"
+write_management_tenant
+printf 'ENABLE_SUBSCRIPTION_CREATION=ture\n' >> "$TEST_TMP/t.env"
+az_state TENANT_ID t-1; az_state ENVIRONMENT_NAME AzureUSGovernment
+cd "$TEST_TMP" || exit 1
+if KION_HOST=https://k KION_API_KEY=k bash "$S" --tenant-file "$TEST_TMP/t.env" --skip-login \
+   >/dev/null 2>"$TEST_TMP/err"; then
+  fail "expected non-zero exit"
+fi
+assert_file_contains "$TEST_TMP/err" "ture"
+assert_az_not_called "ad app"
 teardown_test
 
 finish_tests

@@ -114,7 +114,7 @@ than one subscription.
 
 | Agreement | Tenant-wide FOCUS scope | Supported here |
 |---|---|---|
-| MCA | billing account / billing profile | Yes |
+| MCA | billing account / billing profile | Yes, in the tenant the billing account belongs to |
 | EA | billing account (enrollment) | Yes |
 | CSP (Microsoft Partner Agreement) | Customer scope only | Only if the tenant has exactly one subscription |
 
@@ -123,6 +123,70 @@ Microsoft Partner Agreement. A CSP customer tenant's only tenant-wide scope is
 Customer scope, which lives in the *partner's* tenant and needs Admin agent or
 billing admin there — not reachable from a sign-in to the customer tenant. So a
 CSP customer with more than one subscription cannot be onboarded with this tool.
+
+### MCA: subscription scope exports nothing
+
+Verified on 2026-09-15 against a real MCA billing account, with the billing
+profile's **View charges** policy enabled: a subscription-scope FOCUS export is
+created, schedules, runs — and writes no rows and no manifest at all.
+
+Every check this tool performs passes in that state. The PUT succeeds, the
+run-now succeeds, the container exists. Kion is then pointed at a prefix that
+never gains a manifest, and the tenant shows no spend with no error anywhere.
+So `EXPORT_SCOPE=subscription` is now refused outright when `BILLING_MODEL=MCA`,
+rather than warned about afterwards.
+
+The refusal is MCA-only. Under a Microsoft Partner Agreement, subscription scope
+is the only scope a customer tenant has, and nothing here has been tested there.
+
+### MCA with several tenants on one billing account
+
+Under MCA the only scope carrying data is the billing account, and a billing
+account can span several tenants. One export at that scope therefore contains
+every tenant's costs at once, and it is created in the tenant the billing
+account belongs to — the roll-up tenant.
+
+That means **this tool cannot produce per-tenant billing data under a shared MCA
+billing account.** There is no per-tenant export that carries anything. Getting
+one tenant's costs into its own Kion billing source is a separate problem: today
+people solve it by copying the roll-up container into each tenant, which works
+but copies every tenant's data to every tenant.
+
+What the tool *can* do per customer tenant is create the app registration Kion
+manages that tenant and its subscriptions with. That is `ONBOARD_MODE=management`
+(see below). Billing then comes from the roll-up tenant's own export, onboarded
+once as a normal `full` tenant.
+
+Not yet established, and worth knowing before planning a rollout: whether a
+billing-account-scoped export can be created while signed into a *customer*
+tenant, and whether it can deliver to a storage account outside the billing
+account's own tenant. Until that is tested, assume the export must be created
+from the roll-up tenant.
+
+## Onboarding modes
+
+`ONBOARD_MODE` in `tenants/<name>.env` selects how much of the pipeline a tenant
+gets.
+
+| Mode | storage | exports | app | billing source |
+|---|---|---|---|---|
+| `full` (default) | yes | yes | yes | yes |
+| `management` | no | no | yes | no |
+
+`management` is for a tenant whose spend arrives through another tenant's export.
+It creates the app registration, grants Owner on the management group, and stops.
+No storage account, no FOCUS export, nothing posted to Kion, and `KION_PAYER_ID`
+is never written. Storage keys left in the tenant file are reported as ignored
+rather than silently skipped.
+
+`make app TENANT=<name>` does the same thing for one run without changing the
+tenant file.
+
+`ENABLE_SUBSCRIPTION_CREATION=1` additionally grants the "Minimal subscription
+move" custom role (`roleAssignments` write/delete plus `subscriptions/write` at
+the management-group scope), so Kion can create subscriptions and resource
+groups. It is off unless set, in either mode, and a value other than
+`1`/`true`/`yes` is an error rather than a silent false.
 
 Every step is idempotent, so re-running after a failure resumes rather than
 duplicating.
@@ -166,7 +230,8 @@ holds per-tenant values, which override the `.env` default whenever the tenant
 file sets them non-empty. The values that work that way are exactly:
 
 `AZURE_CLOUD`, `BILLING_MODEL`, `EXPORT_PREFIX`, `EXPORT_SCOPE`,
-`EXPORT_API_VERSION`, `FOCUS_VERSION`, `EXPORT_RECURRENCE`, `EXPORT_TIMEFRAME`.
+`EXPORT_API_VERSION`, `FOCUS_VERSION`, `EXPORT_RECURRENCE`, `EXPORT_TIMEFRAME`,
+`ONBOARD_MODE`, `ENABLE_SUBSCRIPTION_CREATION`.
 
 `KION_HOST`, `KION_API_KEY` and `KION_API_BASE` are `.env`-only: one Kion serves
 every tenant. `RESOURCE_GROUP`, `STORAGE_ACCOUNT`, `CONTAINER`, `LOCATION`,
